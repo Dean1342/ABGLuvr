@@ -108,19 +108,16 @@ async def _scrape_scores_from_url(rt_url, headers, title):
                         if critics_score_match:
                             scores['tomatometer'] = int(critics_score_match.group(1))
                         
-                        # Extract audience score only if there are reviews
-                        audience_reviews_match = re.search(r'"reviewCount":\s*(\d+)', audience_data)
-                        if audience_reviews_match and int(audience_reviews_match.group(1)) > 0:
-                            # Only look for audience score if there are actual reviews
-                            audience_score_patterns = [
-                                r'"score":\s*"(\d+)"',
-                                r'"scorePercent":\s*"(\d+)%"'
-                            ]
-                            for pattern in audience_score_patterns:
-                                audience_score_match = re.search(pattern, audience_data)
-                                if audience_score_match:
-                                    scores['popcornmeter'] = int(audience_score_match.group(1))
-                                    break
+                        # Extract audience score - be more permissive for TV shows
+                        audience_score_patterns = [
+                            r'"score":\s*"(\d+)"',
+                            r'"scorePercent":\s*"(\d+)%"'
+                        ]
+                        for pattern in audience_score_patterns:
+                            audience_score_match = re.search(pattern, audience_data)
+                            if audience_score_match:
+                                scores['popcornmeter'] = int(audience_score_match.group(1))
+                                break
                         
                         if scores:
                             return scores
@@ -199,15 +196,17 @@ async def _scrape_scores_from_url(rt_url, headers, title):
                             break
                 
                 # Try to find audience score (first match only from main content)
-                # But first check if audience reviews exist in the JSON data
-                audience_reviews_available = False
+                # For TV shows, be less restrictive about review count requirements
+                audience_reviews_available = True  # Default to True for more permissive extraction
+                
+                # Check if audience reviews exist in the JSON data
                 audience_json_pattern = r'"audienceScore":[^}]*"reviewCount":\s*(\d+)'
                 audience_reviews_match = re.search(audience_json_pattern, main_html)
                 if audience_reviews_match:
                     review_count = int(audience_reviews_match.group(1))
                     audience_reviews_available = review_count > 0
                 
-                # Only look for audience score if reviews are available
+                # Look for audience score (more permissive for TV shows)
                 if audience_reviews_available:
                     for pattern in audience_patterns:
                         match = re.search(pattern, main_html)
