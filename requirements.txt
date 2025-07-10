@@ -6,4 +6,5 @@ httpx
 playwright
 flask
 requests
+beautifulsoup4
 # For playwright, after install, run: playwright install

@@ -31,7 +31,10 @@ build/
 *.log
 
 # Custom Personas folder
-Custom Personas/
+Custom Personas/*
+!Custom Personas/Prompt Files/Epoe/Epoe_FULL_PERSONA.txt
+!Custom Personas/Prompt Files/Jagbir/Main/jagbir_persona_prompt.txt
+!Custom Personas/Prompt Files/Lemon/Lemon_FULL_PERSONA.txt
 
 # Spotify user tokens (sensitive)
 src/utils/integrations/spotify/spotify_users.json
