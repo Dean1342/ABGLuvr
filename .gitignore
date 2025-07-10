@@ -29,3 +29,9 @@ build/
 
 # Logs
 *.log
+
+# Custom Personas folder
+Custom Personas/
+
+# Spotify user tokens (sensitive)
+src/utils/integrations/spotify/spotify_users.json

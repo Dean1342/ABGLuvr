@@ -2,3 +2,8 @@ discord.py
 openai
 python-dotenv
 tiktoken
+httpx
+playwright
+flask
+requests
+# For playwright, after install, run: playwright install
