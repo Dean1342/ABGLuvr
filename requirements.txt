@@ -3,6 +3,7 @@ openai
 python-dotenv
 tiktoken
 httpx
+aiohttp
 playwright
 flask
 requests

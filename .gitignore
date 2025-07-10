@@ -30,10 +30,20 @@ build/
 # Logs
 *.log
 
-# Custom Personas folder
+# Custom Personas folder - ignore everything except specific persona files
 Custom Personas/*
+!Custom Personas/Prompt Files/
+Custom Personas/Prompt Files/*
+!Custom Personas/Prompt Files/Epoe/
+Custom Personas/Prompt Files/Epoe/*
 !Custom Personas/Prompt Files/Epoe/Epoe_FULL_PERSONA.txt
+!Custom Personas/Prompt Files/Jagbir/
+Custom Personas/Prompt Files/Jagbir/*
+!Custom Personas/Prompt Files/Jagbir/Main/
+Custom Personas/Prompt Files/Jagbir/Main/*
 !Custom Personas/Prompt Files/Jagbir/Main/jagbir_persona_prompt.txt
+!Custom Personas/Prompt Files/Lemon/
+Custom Personas/Prompt Files/Lemon/*
 !Custom Personas/Prompt Files/Lemon/Lemon_FULL_PERSONA.txt
 
 # Spotify user tokens (sensitive)
