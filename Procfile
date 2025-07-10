@@ -1,1 +1,1 @@
-worker: python src/bot.py
+worker: playwright install && python src/bot.py
