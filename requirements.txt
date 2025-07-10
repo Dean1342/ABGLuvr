@@ -8,4 +8,7 @@ playwright
 flask
 requests
 beautifulsoup4
+pdfplumber
+python-docx
+openpyxl
 # For playwright, after install, run: playwright install

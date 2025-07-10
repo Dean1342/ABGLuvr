@@ -27,6 +27,7 @@ class Help(commands.GroupCog, name="help"):
                 "• Mention @ABGLuvr anywhere for a quick response\n"
                 "• Reply to messages and mention the bot for context-aware answers\n"
                 "• Upload or reply to images and mention the bot for image analysis\n"
+                "• Upload files (PDF, DOCX, XLSX, TXT) and mention the bot for file analysis\n"
                 "• Web search: The bot auto-searches when it needs current info\n"
                 "• Prefix with ! to ignore your message in allowed channels"
             ),
