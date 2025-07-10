@@ -1,0 +1,1 @@
+worker: playwright install && python src/bot.py
