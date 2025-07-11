@@ -18,9 +18,11 @@ from utils.integrations.spotify.spotify import (
     spotify_user_profile,
     spotify_user_recommend,
     get_app_access_token,
-    spotify_artist_top_tracks
+    spotify_artist_top_tracks,
+    get_full_album_details
 )
 from utils.ui.pagination import PaginationView
+from utils.ui.spotify_pagination import SpotifyAlbumPaginationView
 
 
 class Spotify(commands.GroupCog, name="spotify"):
@@ -277,74 +279,10 @@ class Spotify(commands.GroupCog, name="spotify"):
         
         # Handle album search with tracks
         if type == "album":
-            album_id = item["id"]
-            token = get_app_access_token()
-            album_url = f"https://api.spotify.com/v1/albums/{album_id}"
-            resp = requests.get(album_url, headers={"Authorization": f"Bearer {token}"})
-            
-            if resp.status_code == 200:
-                album_full = resp.json()
-                tracks = album_full.get("tracks", {}).get("items", [])
-            else:
-                album_full = item
-                tracks = []
-            
-            # Build pages: first page is album info, rest are track pages
-            pages = []
-            
-            # Album info page
-            emb = discord.Embed(
-                title=item["name"],
-                color=discord.Color.purple(),
-                url=item["external_urls"]["spotify"]
-            )
-            if item.get("images"):
-                emb.set_thumbnail(url=item["images"][0]["url"])
-            
-            artists = ', '.join(a['name'] for a in item['artists'])
-            release_date = item.get('release_date', 'Unknown')
-            total_tracks = item.get('total_tracks', 'Unknown')
-            album_type = item.get('album_type', 'Unknown').title()
-            popularity = item.get('popularity', None)
-            genres = ', '.join(item.get('genres', [])) if item.get('genres') else None
-            label = item.get('label') or album_full.get('label')
-            
-            emb.description = f"By {artists}"
-            emb.add_field(name="Release Date", value=release_date, inline=True)
-            emb.add_field(name="Total Tracks", value=str(total_tracks), inline=True)
-            emb.add_field(name="Album Type", value=album_type, inline=True)
-            if popularity is not None:
-                emb.add_field(name="Popularity (0-100)", value=str(popularity), inline=True)
-            if genres:
-                emb.add_field(name="Genres", value=genres, inline=True)
-            if label:
-                emb.add_field(name="Label", value=label, inline=True)
-            pages.append(emb)
-            
-            # Track pages
-            track_names = [f"{i+1}. {t['name']}" for i, t in enumerate(tracks)]
-            for i in range(0, len(track_names), 10):
-                emb = discord.Embed(
-                    title=f"{item['name']} — Tracks {i+1}-{min(i+10, len(track_names))}",
-                    color=discord.Color.purple(),
-                    url=item["external_urls"]["spotify"]
-                )
-                left = track_names[i:i+5]
-                right = track_names[i+5:i+10]
-                if left:
-                    emb.add_field(name="Tracks", value="\n".join(left), inline=True)
-                if right:
-                    emb.add_field(name="Tracks", value="\n".join(right), inline=True)
-                pages.append(emb)
-            
-            def make_embed(page_idx):
-                return pages[page_idx]
-            
-            view = PaginationView(make_embed, len(pages)) if len(pages) > 1 else None
-            if view:
-                await interaction.response.send_message(embed=make_embed(0), view=view)
-            else:
-                await interaction.response.send_message(embed=make_embed(0))
+            # Use the new SpotifyAlbumPaginationView
+            view = SpotifyAlbumPaginationView(item)
+            initial_embed = await view.get_current_embed()
+            await interaction.response.send_message(embed=initial_embed, view=view)
             return
         
         # Handle artist/track search

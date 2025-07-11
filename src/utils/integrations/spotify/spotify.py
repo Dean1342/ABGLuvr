@@ -215,3 +215,12 @@ def spotify_artist_top_tracks(artist_id, market="US"):
     if resp.status_code == 200:
         return resp.json().get("tracks", [])
     return []
+
+def get_full_album_details(album_id):
+    """Get full album details including tracks and additional metadata."""
+    url = f"https://api.spotify.com/v1/albums/{album_id}"
+    token = get_app_access_token()
+    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code == 200:
+        return resp.json()
+    return None
