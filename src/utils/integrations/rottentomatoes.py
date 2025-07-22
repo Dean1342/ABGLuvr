@@ -5,6 +5,66 @@ from bs4 import BeautifulSoup
 import json
 
 
+async def discover_available_seasons(title, year=None, max_seasons=10):
+    """Discover how many seasons are available on Rotten Tomatoes by testing season URLs."""
+    try:
+        # Clean and format the title for URL
+        clean_title = re.sub(r'[^\w\s-]', '', title)
+        clean_title = re.sub(r'\s+', '_', clean_title.strip())
+        clean_title = clean_title.lower()
+        
+        base_url = "https://www.rottentomatoes.com"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        # Test different title variations to find which works
+        title_variations = [
+            clean_title,
+            f"{clean_title}_{year}" if year else None,
+            clean_title.replace('_', '-'),
+            clean_title.replace('_', ''),
+        ]
+        title_variations = [t for t in title_variations if t]
+        
+        available_seasons = []
+        
+        # Test up to max_seasons for each title variation
+        for title_var in title_variations:
+            found_seasons = []
+            
+            for season_num in range(1, max_seasons + 1):
+                test_url = f"{base_url}/tv/{title_var}/s{season_num:02d}"
+                
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(test_url, headers=headers) as response:
+                            if response.status == 200:
+                                # Check if this is actually a season page (not a redirect or error)
+                                html = await response.text()
+                                if f"Season {season_num}" in html or f"s{season_num:02d}" in html.lower():
+                                    found_seasons.append(season_num)
+                            elif response.status == 404:
+                                # If we hit a 404, no more seasons for this title variation
+                                break
+                except:
+                    # Skip failed requests
+                    continue
+                
+                # Add small delay to be respectful
+                await asyncio.sleep(0.1)
+            
+            # If we found seasons with this title variation, use it
+            if found_seasons:
+                available_seasons = found_seasons
+                break
+        
+        return available_seasons
+        
+    except Exception as e:
+        return []
+
+
 async def get_rotten_tomatoes_scores(title, year=None, is_tv=False, season=None):
     """Get Rotten Tomatoes scores for a movie, TV show, or specific season."""
     try:

@@ -8,6 +8,7 @@ from utils.conversation.context import user_personas, user_conversations, GLOBAL
 from utils.ai.multimodal import build_multimodal_content, clean_conversation_history
 from utils.core.datetime_utils import prepend_date_context
 from utils.integrations.websearch import web_search_and_summarize
+from utils.integrations.currency import convert_currency
 from utils.core.text_formatting import format_discord_links
 from utils.conversation.persona_loaders import load_jagbir_persona, load_lemon_persona, load_epoe_persona
 
@@ -143,17 +144,39 @@ def get_function_schemas():
                 },
                 "required": ["query"]
             }
+        },
+        {
+            "name": "convert_currency",
+            "description": "Converts an amount from one currency to another using current exchange rates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amount": {
+                        "type": "number", 
+                        "description": "The amount to convert"
+                    },
+                    "from_currency": {
+                        "type": "string", 
+                        "description": "The source currency code (e.g., USD, EUR, GBP)"
+                    },
+                    "to_currency": {
+                        "type": "string", 
+                        "description": "The target currency code (e.g., USD, EUR, GBP)"
+                    }
+                },
+                "required": ["amount", "from_currency", "to_currency"]
+            }
         }
     ]
 
 
 async def handle_openai_response(client, messages, function_schemas, model, openai_api_key):
-    # Handle OpenAI API response
+    # Handle OpenAI API response with robust error handling
     max_retries = 3
-    retry_count = 0
     
-    while retry_count < max_retries:
+    for attempt in range(max_retries):
         try:
+            # Initial API call
             response = await client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -161,68 +184,116 @@ async def handle_openai_response(client, messages, function_schemas, model, open
                 function_call="auto"
             )
             choice = response.choices[0]
-            break  # Success, exit retry loop
+
+            # Handle function calls if requested
+            if choice.finish_reason == "function_call":
+                func_name = choice.message.function_call.name
+                func_args = choice.message.function_call.arguments
+                import json
+                args = json.loads(func_args)
+                
+                if func_name == "web_search":
+                    try:
+                        web_context = await web_search_and_summarize(args["query"], openai_api_key)
+                        
+                        # Find the original user message that triggered the search
+                        original_user_message = next((msg for msg in reversed(messages) if msg["role"] == "user"), None)
+                        original_content = ""
+                        if original_user_message:
+                            if isinstance(original_user_message["content"], list):
+                                text_parts = [part["text"] for part in original_user_message["content"] if part.get("type") == "text"]
+                                original_content = " ".join(text_parts)
+                            else:
+                                original_content = original_user_message["content"]
+
+                        # Create a new, explicit prompt to guide the model
+                        new_prompt = (
+                            f"The user asked: \"{original_content}\"\n\n"
+                            f"I found some information about this. Here are the web search results:\n"
+                            f"{web_context}\n\n"
+                            f"Now respond to the user's question naturally and conversationally, incorporating this information into your response while staying completely in character. "
+                            f"Don't announce that you searched for information - just naturally weave the facts into your response as if you already knew them. "
+                            f"Keep your personality and speaking style consistent with your character. Make it feel like a natural conversation, not a formal report."
+                        )
+
+                        # Create a new, clean message list for the final response
+                        # This isolates the final generation from the messy function-call history
+                        final_messages = [
+                            messages[0],  # Keep the original system prompt
+                            {"role": "user", "content": new_prompt}
+                        ]
+                        
+                        response2 = await client.chat.completions.create(
+                            model=model,
+                            messages=final_messages  # Use the new, clean message list
+                        )
+                        answer = response2.choices[0].message.content
+                        
+                        # Add source links if available
+                        import re
+                        source_pattern = re.compile(r"Source: (.*?) \((https?://[^)]+)\)")
+                        sources = source_pattern.findall(web_context)
+                        if sources:
+                            sources_section = "\n\nSources:\n" + "\n".join([
+                                f"[{title}]({url})" if title else f"{url}" for title, url in sources
+                            ])
+                            answer = answer.strip() + sources_section
+                            
+                    except Exception as e:
+                        print(f"Error in web search processing: {e}")
+                        answer = "I found some information from web search, but I'm having trouble processing it right now. Please try again."
+                
+                elif func_name == "convert_currency":
+                    try:
+                        result = await convert_currency(
+                            args["amount"], 
+                            args["from_currency"], 
+                            args["to_currency"]
+                        )
+                        
+                        if result.get("success"):
+                            # Format all numbers with commas for better readability
+                            def format_number(num):
+                                if isinstance(num, float):
+                                    # For decimals, format to 2 places and add commas
+                                    return f"{num:,.2f}".rstrip('0').rstrip('.')
+                                else:
+                                    # For integers, just add commas
+                                    return f"{num:,}"
+                            
+                            original_formatted = format_number(result['original_amount'])
+                            converted_formatted = format_number(result['converted_amount'])
+                            rate_formatted = format_number(result['exchange_rate'])
+                            
+                            answer = (
+                                f"{original_formatted} {result['from_currency']} = "
+                                f"**{converted_formatted} {result['to_currency']}**\n\n"
+                                f"-# *Converted via ExchangeRate-API (Rate: 1 {result['from_currency']} = {rate_formatted} {result['to_currency']})*"
+                            )
+                        else:
+                            answer = f"❌ Currency conversion failed: {result.get('error', 'Unknown error')}"
+                    except Exception as e:
+                        print(f"Error in currency conversion: {e}")
+                        answer = "❌ Currency conversion failed due to an unexpected error. Please try again."
+                
+                else:
+                    answer = f"Function {func_name} not implemented."
+            
+            # Handle regular text response
+            else:
+                answer = choice.message.content
+            
+            return choice, answer  # Success, return the final answer
+
         except Exception as e:
-            retry_count += 1
-            print(f"OpenAI API Error (attempt {retry_count}/{max_retries}): {e}")
-            
-            if retry_count >= max_retries:
-                return None, "⚠️ Sorry, I'm having trouble connecting to the AI service. Please try again in a moment."
-            
-            # Wait a bit before retrying
-            await asyncio.sleep(1)
+            print(f"OpenAI API Error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt + 1 >= max_retries:
+                # All retries failed, return an error message to the user
+                return None, "⚠️ Sorry, I'm having trouble connecting to the AI service after multiple attempts. Please try again later."
+            await asyncio.sleep(1.5)  # Wait before retrying
     
-    # Handle function calls
-    if choice.finish_reason == "function_call":
-        func_name = choice.message.function_call.name
-        func_args = choice.message.function_call.arguments
-        import json
-        args = json.loads(func_args)
-        
-        if func_name == "web_search":
-            web_context = await web_search_and_summarize(args["query"], openai_api_key)
-            messages.append({
-                "role": "function",
-                "name": "web_search",
-                "content": web_context
-            })
-            
-            # Get the original user content for re-asking
-            original_content = messages[-3]["content"] if len(messages) >= 3 else ""
-            
-            # Re-ask with web context
-            messages.append({
-                "role": "user",
-                "content": original_content
-            })
-            
-            try:
-                response2 = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    functions=function_schemas,
-                    function_call="none"
-                )
-                answer = response2.choices[0].message.content
-            except Exception as e:
-                print(f"OpenAI API Error (web search follow-up): {e}")
-                answer = "I found some information from web search, but I'm having trouble processing it right now. Please try again."
-            
-            # Add source links if available
-            import re
-            source_pattern = re.compile(r"Source: (.*?) \((https?://[^)]+)\)")
-            sources = source_pattern.findall(web_context)
-            if sources:
-                sources_section = "\n\nSources:\n" + "\n".join([
-                    f"[{title}]({url})" if title else f"{url}" for title, url in sources
-                ])
-                answer = answer.strip() + sources_section
-        else:
-            answer = f"Function {func_name} not implemented."
-    else:
-        answer = choice.message.content
-    
-    return choice, answer
+    # Fallback in case the loop finishes unexpectedly
+    return None, "⚠️ An unexpected error occurred while processing your request."
 
 
 async def send_response(message, answer):

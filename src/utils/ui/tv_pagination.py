@@ -1,5 +1,5 @@
 import discord
-from ..integrations.rottentomatoes import get_rotten_tomatoes_scores, format_rt_scores
+from ..integrations.rottentomatoes import get_rotten_tomatoes_scores, format_rt_scores, discover_available_seasons
 from ..integrations.tmdb import get_poster_url, get_tmdb_url, get_imdb_url
 
 
@@ -9,6 +9,7 @@ class TVPaginationView(discord.ui.View):
         self.tv_details = tv_details
         self.current_page = "overview"  # "overview" or "seasons"
         self.season_data = {}  # Cache for season-specific data
+        self.rt_seasons = None  # Cache for RT-discovered seasons
         self.update_buttons()
 
     def update_buttons(self):
@@ -18,10 +19,9 @@ class TVPaginationView(discord.ui.View):
         if self.current_page == "seasons":
             self.add_item(TVPageButton(self, "overview", "📺 Overview", discord.ButtonStyle.secondary))
         
-        # Show Seasons button if we have seasons and we're on overview
-        num_seasons = self.tv_details.get("number_of_seasons", 0)
-        if num_seasons > 0 and self.current_page == "overview":
-            self.add_item(TVPageButton(self, "seasons", "📋 View All Seasons", discord.ButtonStyle.primary))
+        # Show Seasons button if we're on overview - always show it for TV shows
+        if self.current_page == "overview":
+            self.add_item(TVPageButton(self, "seasons", "📋 View Season Ratings", discord.ButtonStyle.primary))
 
     async def create_overview_embed(self):
         """Create the overview embed for the TV show."""
@@ -52,6 +52,10 @@ class TVPaginationView(discord.ui.View):
         
         rt_scores = await get_rotten_tomatoes_scores(details["name"], first_air_year, is_tv=True)
         
+        # Discover available seasons from Rotten Tomatoes (if not already cached)
+        if self.rt_seasons is None:
+            self.rt_seasons = await discover_available_seasons(details["name"], first_air_year)
+        
         # Rotten Tomatoes Rating
         if rt_scores:
             rt_display = format_rt_scores(rt_scores)
@@ -80,11 +84,22 @@ class TVPaginationView(discord.ui.View):
         if last_air_date and last_air_date != first_air_date:
             emb.add_field(name="Last Aired", value=last_air_date, inline=True)
         
-        # Number of Seasons and Episodes
-        num_seasons = details.get("number_of_seasons")
+        # Number of Seasons and Episodes - use RT data if available, fall back to TMDB
+        tmdb_seasons = details.get("number_of_seasons", 0)
+        rt_season_count = len(self.rt_seasons) if self.rt_seasons else 0
+        
+        # Use the higher count between TMDB and RT (RT is more accurate for some shows)
+        actual_seasons = max(tmdb_seasons, rt_season_count)
         num_episodes = details.get("number_of_episodes")
-        if num_seasons:
-            season_text = f"{num_seasons} season{'s' if num_seasons != 1 else ''}"
+        
+        if actual_seasons > 0:
+            season_text = f"{actual_seasons} season{'s' if actual_seasons != 1 else ''}"
+            if num_episodes:
+                season_text += f", {num_episodes} episodes"
+            emb.add_field(name="Seasons/Episodes", value=season_text, inline=True)
+        elif tmdb_seasons > 0:
+            # Fallback to TMDB data if RT discovery failed
+            season_text = f"{tmdb_seasons} season{'s' if tmdb_seasons != 1 else ''}"
             if num_episodes:
                 season_text += f", {num_episodes} episodes"
             emb.add_field(name="Seasons/Episodes", value=season_text, inline=True)
@@ -146,11 +161,29 @@ class TVPaginationView(discord.ui.View):
             year = details["first_air_date"][:4]
             title_with_year += f" ({year})"
         
-        num_seasons = details.get("number_of_seasons", 0)
+        # Discover available seasons from RT if not already done
+        first_air_year = None
+        if details.get("first_air_date"):
+            first_air_year = int(details["first_air_date"][:4])
+            
+        if self.rt_seasons is None:
+            self.rt_seasons = await discover_available_seasons(details["name"], first_air_year)
+        
+        # Use RT seasons if available, fallback to TMDB
+        if self.rt_seasons:
+            seasons_to_check = self.rt_seasons
+            num_seasons = len(self.rt_seasons)
+            source_info = f"Found {num_seasons} seasons on Rotten Tomatoes"
+        else:
+            # Fallback to TMDB seasons
+            tmdb_seasons = details.get("number_of_seasons", 0)
+            seasons_to_check = list(range(1, tmdb_seasons + 1))
+            num_seasons = tmdb_seasons
+            source_info = f"Using {num_seasons} seasons from TMDB (RT discovery failed)"
         
         emb = discord.Embed(
-            title=f"{title_with_year} - {num_seasons} Season{'s' if num_seasons != 1 else ''}",
-            description="Rotten Tomatoes ratings for each season:",
+            title=f"{title_with_year} - Season Ratings",
+            description=f"{source_info}\nRotten Tomatoes ratings for each season:",
             color=discord.Color.blue()
         )
         
@@ -159,14 +192,9 @@ class TVPaginationView(discord.ui.View):
         if poster_url:
             emb.set_thumbnail(url=poster_url)
         
-        # Get ratings for each season
-        first_air_year = None
-        if details.get("first_air_date"):
-            first_air_year = int(details["first_air_date"][:4])
-        
-        # Fetch all season ratings
+        # Fetch ratings for each discovered season
         season_ratings = []
-        for season_num in range(1, num_seasons + 1):
+        for season_num in seasons_to_check:
             if f"season_{season_num}" not in self.season_data:
                 rt_scores = await get_rotten_tomatoes_scores(
                     details["name"], 
@@ -190,8 +218,8 @@ class TVPaginationView(discord.ui.View):
             # Split seasons into groups of 5 for inline fields
             for i in range(0, len(season_ratings), 5):
                 group = season_ratings[i:i+5]
-                start_season = i + 1
-                end_season = min(i + 5, len(season_ratings))
+                start_season = seasons_to_check[i]
+                end_season = seasons_to_check[min(i + 4, len(seasons_to_check) - 1)]
                 
                 field_name = f"Seasons {start_season}-{end_season}" if end_season > start_season else f"Season {start_season}"
                 emb.add_field(
@@ -199,6 +227,12 @@ class TVPaginationView(discord.ui.View):
                     value="\n".join(group),
                     inline=True
                 )
+        else:
+            emb.add_field(
+                name="No Season Data",
+                value="Unable to find season ratings on Rotten Tomatoes",
+                inline=False
+            )
         
         return emb
 
