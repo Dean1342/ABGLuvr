@@ -18,14 +18,8 @@ async def discover_available_seasons(title, year=None, max_seasons=10):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         
-        # Test different title variations to find which works
-        title_variations = [
-            clean_title,
-            f"{clean_title}_{year}" if year else None,
-            clean_title.replace('_', '-'),
-            clean_title.replace('_', ''),
-        ]
-        title_variations = [t for t in title_variations if t]
+        # Get multiple title variations for better matching
+        title_variations = get_title_variations(title, clean_title)
         
         available_seasons = []
         
@@ -65,6 +59,45 @@ async def discover_available_seasons(title, year=None, max_seasons=10):
         return []
 
 
+def get_title_variations(original_title, clean_title):
+    """Generate multiple title variations for better URL matching"""
+    variations = [clean_title]
+    
+    # Handle ampersands specifically
+    if '&' in original_title:
+        # Convert & to 'and' with underscores
+        ampersand_version = original_title.replace('&', 'and')
+        ampersand_version = re.sub(r'[^\w\s-]', '', ampersand_version)
+        ampersand_version = re.sub(r'\s+', '_', ampersand_version.strip()).lower()
+        if ampersand_version not in variations:
+            variations.append(ampersand_version)
+        
+        # Convert & to 'and' with hyphens
+        ampersand_hyphen = original_title.replace('&', 'and')
+        ampersand_hyphen = re.sub(r'[^\w\s-]', '', ampersand_hyphen)
+        ampersand_hyphen = re.sub(r'\s+', '-', ampersand_hyphen.strip()).lower()
+        if ampersand_hyphen not in variations:
+            variations.append(ampersand_hyphen)
+    
+    # Try with hyphens instead of underscores
+    hyphen_version = clean_title.replace('_', '-')
+    if hyphen_version not in variations:
+        variations.append(hyphen_version)
+    
+    # Try without spaces/separators
+    no_separator_version = clean_title.replace('_', '').replace('-', '')
+    if no_separator_version not in variations:
+        variations.append(no_separator_version)
+    
+    # Try with "the" removed if it starts with "the_"
+    if clean_title.startswith('the_'):
+        no_the_version = clean_title[4:]  # Remove "the_"
+        if no_the_version not in variations:
+            variations.append(no_the_version)
+    
+    return variations
+
+
 async def get_rotten_tomatoes_scores(title, year=None, is_tv=False, season=None):
     """Get Rotten Tomatoes scores for a movie, TV show, or specific season."""
     try:
@@ -73,6 +106,9 @@ async def get_rotten_tomatoes_scores(title, year=None, is_tv=False, season=None)
         clean_title = re.sub(r'\s+', '_', clean_title.strip())
         clean_title = clean_title.lower()
         
+        # Get multiple title variations for better matching
+        title_variations = get_title_variations(title, clean_title)
+        
         # Construct potential URLs
         base_url = "https://www.rottentomatoes.com"
         
@@ -80,35 +116,31 @@ async def get_rotten_tomatoes_scores(title, year=None, is_tv=False, season=None)
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         
-        # Try different URL variations (prioritize year-specific URLs)
+        # Try different URL variations for each title variation
         url_variations = []
         
-        if is_tv:
-            if season:
-                # Season-specific URLs
-                url_variations = [
-                    f"{base_url}/tv/{clean_title}/s{season:02d}",
-                    f"{base_url}/tv/{clean_title}_{year}/s{season:02d}" if year else None,
-                    f"{base_url}/tv/{clean_title.replace('_', '-')}/s{season:02d}",
-                    f"{base_url}/tv/{clean_title.replace('_', '')}/s{season:02d}",
-                ]
-                # Remove None values
-                url_variations = [url for url in url_variations if url]
+        for title_var in title_variations:
+            if is_tv:
+                if season:
+                    # Season-specific URLs
+                    urls = [
+                        f"{base_url}/tv/{title_var}/s{season:02d}",
+                        f"{base_url}/tv/{title_var}_{year}/s{season:02d}" if year else None,
+                    ]
+                    url_variations.extend([url for url in urls if url])
+                else:
+                    # Show-level URLs
+                    urls = [
+                        f"{base_url}/tv/{title_var}_{year}" if year else f"{base_url}/tv/{title_var}",
+                        f"{base_url}/tv/{title_var}",
+                    ]
+                    url_variations.extend(urls)
             else:
-                # Show-level URLs
-                url_variations = [
-                    f"{base_url}/tv/{clean_title}_{year}" if year else f"{base_url}/tv/{clean_title}",
-                    f"{base_url}/tv/{clean_title}",
-                    f"{base_url}/tv/{clean_title.replace('_', '-')}",
-                    f"{base_url}/tv/{clean_title.replace('_', '')}",
+                urls = [
+                    f"{base_url}/m/{title_var}_{year}" if year else f"{base_url}/m/{title_var}",
+                    f"{base_url}/m/{title_var}",
                 ]
-        else:
-            url_variations = [
-                f"{base_url}/m/{clean_title}_{year}" if year else f"{base_url}/m/{clean_title}",
-                f"{base_url}/m/{clean_title}",
-                f"{base_url}/m/{clean_title.replace('_', '-')}",
-                f"{base_url}/m/{clean_title.replace('_', '')}",
-            ]
+                url_variations.extend(urls)
         
         # Remove duplicates while preserving order
         seen = set()
