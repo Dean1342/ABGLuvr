@@ -15,13 +15,13 @@ class TVPaginationView(discord.ui.View):
     def update_buttons(self):
         self.clear_items()
         
-        # Show Overview button if we're on seasons page
-        if self.current_page == "seasons":
+        # Show Overview button if we're not on overview page
+        if self.current_page != "overview":
             self.add_item(TVPageButton(self, "overview", "📺 Overview", discord.ButtonStyle.secondary))
         
-        # Show Seasons button if we're on overview - always show it for TV shows
-        if self.current_page == "overview":
-            self.add_item(TVPageButton(self, "seasons", "📋 View Season Ratings", discord.ButtonStyle.primary))
+        # Show Seasons button if we're not on seasons page
+        if self.current_page != "seasons":
+            self.add_item(TVPageButton(self, "seasons", "📋 Season Ratings", discord.ButtonStyle.primary))
 
     async def create_overview_embed(self):
         """Create the overview embed for the TV show."""

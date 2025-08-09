@@ -3,6 +3,7 @@ import os
 import re
 import asyncio
 import discord
+import datetime
 from openai import AsyncOpenAI
 from utils.conversation.context import user_personas, user_conversations, GLOBAL_BEHAVIOR, PERSONAS, trim_conversation_by_tokens
 from utils.ai.multimodal import build_multimodal_content, clean_conversation_history
@@ -132,11 +133,16 @@ def build_user_message_content(message, content, original_user_id, original_disp
 
 
 def get_function_schemas():
+    current_date = datetime.date.today().strftime('%A, %B %d, %Y')
     # Return function schemas for OpenAI function calling
     return [
         {
             "name": "web_search",
-            "description": "Performs a web search for the given query and returns relevant results.",
+            "description": (
+                f"Performs a web search for the given query and returns relevant results. "
+                f"Use this function if the user's question is about current events, recent news, or anything that may have changed since your knowledge cutoff. "
+                f"Today's date is {current_date}."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
