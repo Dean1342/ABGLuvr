@@ -38,7 +38,7 @@ async def get_system_prompt(persona, active_conv_key):
         model = os.getenv("OPENAI_FINAL_MODEL", "gpt-4.1-2025-04-14")
     else:
         system_prompt = GLOBAL_BEHAVIOR + " " + PERSONAS[persona]
-        model = os.getenv("OPENAI_FINAL_MODEL", "gpt-4.1-2025-04-14")
+        model = os.getenv("OPENAI_FINAL_MODEL", "gpt-4.1-mini-2025-04-14")
     
     return system_prompt, model
 
