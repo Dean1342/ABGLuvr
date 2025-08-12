@@ -2,7 +2,8 @@ import httpx
 import pdfplumber
 import docx
 import openpyxl
-from io import BytesIO
+import csv
+from io import BytesIO, StringIO
 
 
 async def is_expired_discord_cdn_url(url):
@@ -226,6 +227,38 @@ def extract_text_from_xlsx(file_bytes):
         return None
 
 
+def extract_text_from_csv(file_bytes):
+    """Extract text from CSV bytes"""
+    try:
+        # Try different encodings
+        for encoding in ['utf-8', 'latin-1', 'cp1252']:
+            try:
+                text_content = file_bytes.decode(encoding)
+                csv_reader = csv.reader(StringIO(text_content))
+                text = ""
+                row_count = 0
+                max_rows = 1000  # Limit to prevent huge outputs
+                
+                for row in csv_reader:
+                    if row_count >= max_rows:
+                        text += f"\n[CSV truncated after {max_rows} rows due to size limit...]"
+                        break
+                    
+                    # Join columns with tabs for better formatting
+                    row_text = "\t".join([str(cell) if cell is not None else "" for cell in row])
+                    if row_text.strip():
+                        text += row_text + "\n"
+                    row_count += 1
+                
+                return text.strip()
+            except (UnicodeDecodeError, csv.Error):
+                continue
+        return None
+    except Exception as e:
+        print(f"Error extracting CSV text: {e}")
+        return None
+
+
 def extract_text_from_txt(file_bytes):
     """Extract text from TXT bytes"""
     try:
@@ -260,6 +293,8 @@ async def process_file_attachment(attachment):
         return extract_text_from_docx(file_bytes)
     elif filename.endswith('.xlsx'):
         return extract_text_from_xlsx(file_bytes)
+    elif filename.endswith('.csv'):
+        return extract_text_from_csv(file_bytes)
     elif filename.endswith(('.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml')):
         return extract_text_from_txt(file_bytes)
     else:
@@ -273,3 +308,11 @@ def truncate_text(text, max_chars=10000):
     
     truncated = text[:max_chars]
     return truncated + "\n\n[Content truncated due to length...]"
+
+
+def has_non_image_attachments(message):
+    """Check if message has non-image file attachments"""
+    for attachment in message.attachments:
+        if not (attachment.content_type and attachment.content_type.startswith("image")):
+            return True
+    return False

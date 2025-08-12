@@ -95,8 +95,91 @@ Never sound like a scripted bot, never break character, and never default to cor
     "Epoe": "Adopt the persona of Epoe, a real member of this Discord server. Use his authentic style, slang, and opinions. (This persona uses real messages for reference.)",
 }
 
+# Model definitions
+MODELS = {
+    "GPT-4.1": {
+        "id": "gpt-4.1-2025-04-14",
+        "name": "GPT-4.1",
+        "description": "The best model for coding and agentic tasks across domains",
+        "reasoning": "●●●●",
+        "speed": "●●●",
+        "input_cost": "$1.25",
+        "cached_input_cost": "$0.13",
+        "output_cost": "$10.00",
+        "context_window": "1,047,576",
+        "max_output": "32,768",
+        "knowledge_cutoff": "May 31, 2024"
+    },
+    "GPT-4.1 Mini": {
+        "id": "gpt-4.1-mini-2025-04-14",
+        "name": "GPT-4.1 Mini",
+        "description": "A faster, cost-efficient version of GPT-4.1 for well-defined tasks",
+        "reasoning": "●●●",
+        "speed": "●●●●",
+        "input_cost": "$0.25",
+        "cached_input_cost": "$0.03",
+        "output_cost": "$2.00",
+        "context_window": "1,047,576",
+        "max_output": "32,768",
+        "knowledge_cutoff": "May 31, 2024"
+    },
+    "GPT-4.1 Nano": {
+        "id": "gpt-4.1-nano-2025-04-14",
+        "name": "GPT-4.1 Nano",
+        "description": "Fastest, most cost-efficient version of GPT-4.1",
+        "reasoning": "●●",
+        "speed": "●●●●●",
+        "input_cost": "$0.05",
+        "cached_input_cost": "$0.01",
+        "output_cost": "$0.40",
+        "context_window": "1,047,576",
+        "max_output": "32,768",
+        "knowledge_cutoff": "May 31, 2024"
+    },
+    "GPT-5": {
+        "id": "gpt-5-2025-08-07",
+        "name": "GPT-5",
+        "description": "Fast, highly intelligent model with largest context window",
+        "reasoning": "●●●●",
+        "speed": "●●●",
+        "input_cost": "$2.00",
+        "cached_input_cost": "$0.50",
+        "output_cost": "$8.00",
+        "context_window": "400,000",
+        "max_output": "128,000",
+        "knowledge_cutoff": "Sep 29, 2024"
+    },
+    "GPT-5 Mini": {
+        "id": "gpt-5-mini-2025-08-07",
+        "name": "GPT-5 Mini",
+        "description": "Balanced for intelligence, speed, and cost",
+        "reasoning": "●●●",
+        "speed": "●●●●",
+        "input_cost": "$0.40",
+        "cached_input_cost": "$0.10",
+        "output_cost": "$1.60",
+        "context_window": "400,000",
+        "max_output": "128,000",
+        "knowledge_cutoff": "May 30, 2024"
+    },
+    "GPT-5 Nano": {
+        "id": "gpt-5-nano-2025-08-07",
+        "name": "GPT-5 Nano",
+        "description": "Fastest, most cost-effective GPT-5 model",
+        "reasoning": "●●",
+        "speed": "●●●●●",
+        "input_cost": "$0.10",
+        "cached_input_cost": "$0.03",
+        "output_cost": "$0.40",
+        "context_window": "400,000",
+        "max_output": "128,000",
+        "knowledge_cutoff": "May 30, 2024"
+    }
+}
+
 user_personas = {}
 user_conversations = {}
+user_models = {}  # New: stores per-user model preferences
 
 def count_tokens(messages, model="gpt-4.1-mini-2025-04-14"):
     enc = tiktoken.get_encoding("cl100k_base")

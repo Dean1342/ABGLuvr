@@ -4,8 +4,9 @@ import re
 import asyncio
 import discord
 import datetime
+import json
 from openai import AsyncOpenAI
-from utils.conversation.context import user_personas, user_conversations, GLOBAL_BEHAVIOR, PERSONAS, trim_conversation_by_tokens
+from utils.conversation.context import user_personas, user_conversations, user_models, GLOBAL_BEHAVIOR, PERSONAS, MODELS, trim_conversation_by_tokens
 from utils.ai.multimodal import build_multimodal_content, clean_conversation_history
 from utils.core.datetime_utils import prepend_date_context
 from utils.integrations.websearch import web_search_and_summarize
@@ -26,21 +27,21 @@ def resolve_discord_user_id(user_str, guild):
 
 
 async def get_system_prompt(persona, active_conv_key):
-    # Get the system prompt for the given persona
+    # Get the system prompt for the given persona and user's selected model
     if persona == "Jagbir":
         system_prompt = GLOBAL_BEHAVIOR + " " + load_jagbir_persona()
-        model = "gpt-4.1-2025-04-14"
     elif persona == "Lemon":
         system_prompt = GLOBAL_BEHAVIOR + " " + load_lemon_persona()
-        model = os.getenv("OPENAI_FINAL_MODEL", "gpt-4.1-2025-04-14")
     elif persona == "Epoe":
         system_prompt = GLOBAL_BEHAVIOR + " " + load_epoe_persona()
-        model = os.getenv("OPENAI_FINAL_MODEL", "gpt-4.1-2025-04-14")
     else:
         system_prompt = GLOBAL_BEHAVIOR + " " + PERSONAS[persona]
-        model = os.getenv("OPENAI_FINAL_MODEL", "gpt-4.1-mini-2025-04-14")
     
-    return system_prompt, model
+    # Get user's selected model, default to GPT-4.1 Mini
+    user_model = user_models.get(active_conv_key, "GPT-4.1 Mini")
+    model_id = MODELS[user_model]["id"]
+    
+    return system_prompt, model_id
 
 
 def check_spotify_keywords(message_content):
@@ -195,7 +196,6 @@ async def handle_openai_response(client, messages, function_schemas, model, open
             if choice.finish_reason == "function_call":
                 func_name = choice.message.function_call.name
                 func_args = choice.message.function_call.arguments
-                import json
                 args = json.loads(func_args)
                 
                 if func_name == "web_search":
@@ -236,7 +236,6 @@ async def handle_openai_response(client, messages, function_schemas, model, open
                         answer = response2.choices[0].message.content
                         
                         # Add source links if available
-                        import re
                         source_pattern = re.compile(r"Source: (.*?) \((https?://[^)]+)\)")
                         sources = source_pattern.findall(web_context)
                         if sources:

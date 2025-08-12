@@ -13,7 +13,7 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 from utils.conversation.context import user_personas, user_conversations
-from utils.ai.multimodal import build_multimodal_content, clean_conversation_history
+from utils.ai.multimodal import build_multimodal_content, clean_conversation_history, has_non_image_attachments
 from utils.core.datetime_utils import prepend_date_context
 from utils.ai.message_processing import (
     get_system_prompt, check_spotify_keywords, find_foreign_conversation,
@@ -57,6 +57,12 @@ class MyBot(commands.Bot):
         try:
             from cogs.help import Help
             await self.add_cog(Help(self))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+        try:
+            from cogs.model import Model
+            await self.add_cog(Model(self))
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -123,6 +129,9 @@ async def on_message(message: discord.Message):
 
     # Build multimodal content from message
     content = await build_multimodal_content(message)
+
+    # Check if message has non-image file attachments to determine if web search should be available
+    has_files = has_non_image_attachments(message)
 
     # Set up OpenAI client
     openai_api_key = os.getenv('OPENAI_API_KEY', 'YOUR_OPENAI_API_KEY')
