@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import re
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -15,6 +16,7 @@ if current_dir not in sys.path:
 from utils.conversation.context import user_personas, user_conversations
 from utils.ai.multimodal import build_multimodal_content, clean_conversation_history, has_non_image_attachments
 from utils.core.datetime_utils import prepend_date_context
+from utils.core.text_formatting import fix_social_media_links, contains_social_media_links, contains_user_mentions, remove_mentions_from_text
 from utils.ai.message_processing import (
     get_system_prompt, check_spotify_keywords, find_foreign_conversation,
     build_user_message_content, get_function_schemas, handle_openai_response,
@@ -88,7 +90,95 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
-    # Channel restrictions and mention override
+    # Check for social media links that need fixing FIRST (before any channel restrictions)
+    if message.content and contains_social_media_links(message.content):
+        fixed_content, link_changed = fix_social_media_links(message.content)
+        
+        if link_changed:
+            try:
+                # Delete the original message
+                await message.delete()
+                
+                # Add sub-text footer using Discord markdown with blank line separation
+                footer_message = "\n\n-# 🔗 Embed Fixed & Resent • Link automatically fixed for better Discord embeds"
+                content_with_footer = fixed_content + footer_message
+                
+                # Check if message contains user mentions to prevent double pings
+                has_mentions = contains_user_mentions(fixed_content)
+                
+                # Try webhook approach first for better user attribution
+                try:
+                    webhooks = await message.channel.webhooks()
+                    webhook = None
+                    
+                    # Find existing bot webhook or create one
+                    for wh in webhooks:
+                        if wh.user == bot.user:
+                            webhook = wh
+                            break
+                    
+                    if not webhook:
+                        webhook = await message.channel.create_webhook(name="ABGLuvr Link Fixer")
+                    
+                    if has_mentions:
+                        # Two-step approach to prevent double pings but keep highlighting
+                        # Step 1: Send without mentions
+                        content_without_mentions, original_content = remove_mentions_from_text(content_with_footer)
+                        sent_message = await webhook.send(
+                            content=content_without_mentions,
+                            username=message.author.display_name,
+                            avatar_url=message.author.avatar.url if message.author.avatar else None,
+                            allowed_mentions=discord.AllowedMentions.none(),
+                            wait=True
+                        )
+                        
+                        # Step 2: Edit to include mentions (won't trigger new notifications)
+                        await sent_message.edit(
+                            content=content_with_footer,
+                            allowed_mentions=discord.AllowedMentions(everyone=False, users=True, roles=True)
+                        )
+                    else:
+                        # No mentions, send normally
+                        await webhook.send(
+                            content=content_with_footer,
+                            username=message.author.display_name,
+                            avatar_url=message.author.avatar.url if message.author.avatar else None,
+                            allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True)
+                        )
+                    
+                except (discord.Forbidden, discord.HTTPException):
+                    # Fallback: Send as bot with user attribution in the message
+                    attribution_content = f"**{message.author.display_name}:** {content_with_footer}"
+                    
+                    if has_mentions:
+                        # Two-step approach for fallback too
+                        attribution_no_mentions, _ = remove_mentions_from_text(attribution_content)
+                        sent_message = await message.channel.send(
+                            content=attribution_no_mentions,
+                            allowed_mentions=discord.AllowedMentions.none()
+                        )
+                        
+                        await sent_message.edit(
+                            content=attribution_content,
+                            allowed_mentions=discord.AllowedMentions(everyone=False, users=True, roles=True)
+                        )
+                    else:
+                        await message.channel.send(
+                            content=attribution_content,
+                            allowed_mentions=discord.AllowedMentions(everyone=True, users=True, roles=True)
+                        )
+                
+                # Return early to prevent normal bot processing
+                return
+                
+            except discord.Forbidden:
+                # If we can't delete the message or create webhook, just continue with normal processing
+                pass
+            except Exception as e:
+                # Log error but continue with normal processing
+                print(f"Error fixing social media links: {e}")
+
+    # Channel restrictions and mention override (for normal bot functionality)
     channel_ids = os.getenv("CHANNEL_IDS", os.getenv("CHANNEL_ID", ""))
     allowed_channels = [cid.strip() for cid in channel_ids.split(",") if cid.strip()]
     mentioned = bot.user in message.mentions
