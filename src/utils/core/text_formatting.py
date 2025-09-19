@@ -40,7 +40,7 @@ def fix_social_media_links(text):
     fixed_patterns = [
         r'https?://fixupx\.com',
         r'https?://(?:www\.)?tnktok\.com',
-        r'https?://(?:www\.)?instagramez\.com',
+        r'https?://eeinstagram\.com',
     ]
     
     for pattern in fixed_patterns:
@@ -98,10 +98,9 @@ def fix_social_media_links(text):
         
         text = re.sub(pattern, replace_tiktok_link, text, flags=re.IGNORECASE)
     
-    # Instagram link patterns
+    # Instagram link patterns - only fix reel links, not profile links
     instagram_patterns = [
-        r'https?://(?:www\.|m\.)?instagram\.com/((?:p|reel|tv)/[^?\s]+)(?:\?[^?\s]*)?',
-        r'https?://(?:www\.|m\.)?instagram\.com/([^?\s]+)(?:\?[^?\s]*)?'
+        r'https?://(?:www\.|m\.)?instagram\.com/((?:reel|p|tv)/[^?\s]+)(?:\?[^?\s]*)?',
     ]
     
     for pattern in instagram_patterns:
@@ -111,7 +110,7 @@ def fix_social_media_links(text):
             path = match.group(1)
             # Clean up path
             path = path.rstrip('/')
-            return f"https://www.instagramez.com/{path}"
+            return f"https://eeinstagram.com/{path}"
         
         text = re.sub(pattern, replace_instagram_link, text, flags=re.IGNORECASE)
     
@@ -144,7 +143,7 @@ def contains_social_media_links(text):
     social_patterns = [
         r'https?://(?:www\.|mobile\.|m\.|vm\.|vt\.)?(?:x\.com|twitter\.com)',
         r'https?://(?:www\.|vm\.|vt\.)?tiktok\.com',
-        r'https?://(?:www\.|m\.)?instagram\.com',
+        r'https?://(?:www\.|m\.)?instagram\.com/(?:reel|p|tv)/',  # Only detect reel/post/tv links
         r'https?://(?:vx|fx|twittpr|nitter)\.[\w.]+',
     ]
     
@@ -152,7 +151,7 @@ def contains_social_media_links(text):
     fixed_patterns = [
         r'https?://fixupx\.com',
         r'https?://(?:www\.)?tnktok\.com',
-        r'https?://(?:www\.)?instagramez\.com',
+        r'https?://eeinstagram\.com',
         r'https?://(?:www\.)?ddinstagram\.com',  # Legacy support
     ]
     
