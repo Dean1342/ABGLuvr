@@ -40,7 +40,7 @@ def fix_social_media_links(text):
     fixed_patterns = [
         r'https?://fixupx\.com',
         r'https?://(?:www\.)?tnktok\.com',
-        r'https?://eeinstagram\.com',
+        r'https?://kkinstagram\.com',
     ]
     
     for pattern in fixed_patterns:
@@ -110,7 +110,7 @@ def fix_social_media_links(text):
             path = match.group(1)
             # Clean up path
             path = path.rstrip('/')
-            return f"https://eeinstagram.com/{path}"
+            return f"https://kkinstagram.com/{path}"
         
         text = re.sub(pattern, replace_instagram_link, text, flags=re.IGNORECASE)
     
@@ -151,7 +151,7 @@ def contains_social_media_links(text):
     fixed_patterns = [
         r'https?://fixupx\.com',
         r'https?://(?:www\.)?tnktok\.com',
-        r'https?://eeinstagram\.com',
+        r'https?://kkinstagram\.com',
         r'https?://(?:www\.)?ddinstagram\.com',  # Legacy support
     ]
     
