@@ -41,6 +41,7 @@ def fix_social_media_links(text):
         r'https?://fixupx\.com',
         r'https?://(?:www\.)?tnktok\.com',
         r'https?://kkinstagram\.com',
+        r'https?://(?:www\.)?vxreddit\.com',
     ]
     
     for pattern in fixed_patterns:
@@ -114,6 +115,22 @@ def fix_social_media_links(text):
         
         text = re.sub(pattern, replace_instagram_link, text, flags=re.IGNORECASE)
     
+    # Reddit link patterns
+    reddit_patterns = [
+        r'https?://(?:www\.|m\.)?reddit\.com/([^?\s]+)(?:\?[^?\s]*)?',
+    ]
+    
+    for pattern in reddit_patterns:
+        def replace_reddit_link(match):
+            nonlocal changed
+            changed = True
+            path = match.group(1)
+            # Clean up path
+            path = path.rstrip('/')
+            return f"https://vxreddit.com/{path}"
+        
+        text = re.sub(pattern, replace_reddit_link, text, flags=re.IGNORECASE)
+    
     # Also fix other embed fixing services to use our preferred ones
     # Fix vx.com, fx.com, etc. for X/Twitter
     other_x_fixes = [
@@ -144,6 +161,7 @@ def contains_social_media_links(text):
         r'https?://(?:www\.|mobile\.|m\.|vm\.|vt\.)?(?:x\.com|twitter\.com)',
         r'https?://(?:www\.|vm\.|vt\.)?tiktok\.com',
         r'https?://(?:www\.|m\.)?instagram\.com/(?:reel|p|tv)/',  # Only detect reel/post/tv links
+        r'https?://(?:www\.|m\.)?reddit\.com/',
         r'https?://(?:vx|fx|twittpr|nitter)\.[\w.]+',
     ]
     
@@ -153,6 +171,7 @@ def contains_social_media_links(text):
         r'https?://(?:www\.)?tnktok\.com',
         r'https?://kkinstagram\.com',
         r'https?://(?:www\.)?ddinstagram\.com',  # Legacy support
+        r'https?://(?:www\.)?vxreddit\.com',
     ]
     
     # Check if any fixed links exist - if so, don't process
