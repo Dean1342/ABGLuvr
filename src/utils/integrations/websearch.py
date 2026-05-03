@@ -90,5 +90,5 @@ async def web_search_and_summarize(query, openai_api_key, num_results=3):
     ])
     if not combined_text:
         return "No useful information found."
-    combined_text = truncate_to_token_limit(combined_text, max_tokens=1000000, model=default_model)
+    combined_text = truncate_to_token_limit(combined_text, max_tokens=250000, model=default_model)
     return combined_text

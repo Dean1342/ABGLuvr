@@ -37,8 +37,8 @@ async def get_system_prompt(persona, active_conv_key):
     else:
         system_prompt = GLOBAL_BEHAVIOR + " " + PERSONAS[persona]
     
-    # Get user's selected model, default to GPT-4.1 Mini
-    user_model = user_models.get(active_conv_key, "GPT-4.1 Mini")
+    # Get user's selected model, default to GPT-5.4 Mini
+    user_model = user_models.get(active_conv_key, "GPT-5.4 Mini")
     model_id = MODELS[user_model]["id"]
     
     return system_prompt, model_id
@@ -123,14 +123,16 @@ def build_user_message_content(message, content, original_user_id, original_disp
         )
     
     # Build multimodal content with author info
-    if isinstance(content, list) and content:
-        user_message_content = ([{"type": "text", "text": context_note + author_info}] if context_note else [{"type": "text", "text": author_info}]) + content
-    elif isinstance(content, list):
-        user_message_content = [{"type": "text", "text": context_note + author_info}] if context_note else [{"type": "text", "text": author_info}]
-    else:
-        user_message_content = (context_note + author_info + "\n" + (str(content) if content else message.content))
+    clean_message_content = content if content else message.content
     
-    return user_message_content, display_name, username, user_id
+    if isinstance(content, list) and content:
+        api_message_content = ([{"type": "text", "text": context_note + author_info}] if context_note else [{"type": "text", "text": author_info}]) + content
+    elif isinstance(content, list):
+        api_message_content = [{"type": "text", "text": context_note + author_info}] if context_note else [{"type": "text", "text": author_info}]
+    else:
+        api_message_content = (context_note + author_info + "\n" + (str(content) if content else message.content))
+    
+    return api_message_content, clean_message_content, display_name, username, user_id
 
 
 def get_function_schemas():

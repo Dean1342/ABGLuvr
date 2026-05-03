@@ -174,6 +174,45 @@ MODELS = {
         "context_window": "400,000",
         "max_output": "128,000",
         "knowledge_cutoff": "May 30, 2024"
+    },
+    "GPT-5.4": {
+        "id": "gpt-5.4-2026-03-17",
+        "name": "GPT-5.4",
+        "description": "A more affordable model for coding and professional work.",
+        "reasoning": "●●●●●",
+        "speed": "●●●",
+        "input_cost": "$2.50",
+        "cached_input_cost": "$0.25",
+        "output_cost": "$15.00",
+        "context_window": "1,050,000",
+        "max_output": "128,000",
+        "knowledge_cutoff": "Aug 31, 2025"
+    },
+    "GPT-5.4 Mini": {
+        "id": "gpt-5.4-mini-2026-03-17",
+        "name": "GPT-5.4 Mini",
+        "description": "Our strongest mini model yet for coding, computer use, and subagents",
+        "reasoning": "●●●●",
+        "speed": "●●●●",
+        "input_cost": "$0.75",
+        "cached_input_cost": "$0.08",
+        "output_cost": "$4.50",
+        "context_window": "400,000",
+        "max_output": "128,000",
+        "knowledge_cutoff": "Aug 31, 2025"
+    },
+    "GPT-5.4 Nano": {
+        "id": "gpt-5.4-nano-2026-03-17",
+        "name": "GPT-5.4 Nano",
+        "description": "Our cheapest GPT-5.4-class model for simple high-volume tasks",
+        "reasoning": "●●●",
+        "speed": "●●●●",
+        "input_cost": "$0.20",
+        "cached_input_cost": "$0.02",
+        "output_cost": "$1.25",
+        "context_window": "400,000",
+        "max_output": "128,000",
+        "knowledge_cutoff": "Aug 31, 2025"
     }
 }
 

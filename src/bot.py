@@ -8,6 +8,11 @@ from discord import app_commands
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
+# Load environment variables early so imports that rely on them don't fail
+# Specifically target the .env file in the parent directory (root of the workspace)
+env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
+load_dotenv(env_path)
+
 # Add src directory to Python path so imports work correctly
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -24,9 +29,6 @@ from utils.ai.message_processing import (
 )
 
 # Main bot entry point and event handlers
-
-# Load environment variables
-load_dotenv()
 
 # Set up Discord bot intents
 intents = discord.Intents.default()
@@ -236,7 +238,7 @@ async def on_message(message: discord.Message):
     )
 
     # Build user message for OpenAI
-    user_message_content, display_name, username, user_id = build_user_message_content(
+    api_message_content, clean_message_content, display_name, username, user_id = build_user_message_content(
         message, content, original_user_id, original_display_name
     )
 
@@ -247,7 +249,7 @@ async def on_message(message: discord.Message):
         api_msg = {"role": msg["role"], "content": msg["content"]}
         api_ready_conversation.append(api_msg)
         
-    messages = api_ready_conversation + [{"role": "user", "content": user_message_content}]
+    messages = api_ready_conversation + [{"role": "user", "content": api_message_content}]
 
     # Call OpenAI and send response
     async with message.channel.typing():
@@ -262,7 +264,7 @@ async def on_message(message: discord.Message):
     
     # Update conversation history
     await update_conversation_history(
-        conversation, user_message_content, answer, user_id, display_name, username, active_conv_key, openai_api_key
+        conversation, clean_message_content, answer, user_id, display_name, username, active_conv_key, openai_api_key
     )
 
 # Run the bot

@@ -13,7 +13,7 @@ class Model(commands.GroupCog, name="model"):
     async def selected(self, interaction: discord.Interaction):
         # Show the user's current model
         key = (interaction.user.id, interaction.channel_id)
-        model = user_models.get(key, "GPT-4.1 Mini")
+        model = user_models.get(key, "GPT-5.4 Mini")
         model_info = MODELS[model]
         
         # Create color based on model type

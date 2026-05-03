@@ -22,6 +22,7 @@ build/
 
 # VS Code
 .vscode/
+ABGLuvr.code-workspace
 
 # Testing
 .pytest_cache/
