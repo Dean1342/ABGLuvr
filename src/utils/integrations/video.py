@@ -70,9 +70,25 @@ def _extract_metadata(info: dict, fallback_url: str) -> dict:
     }
 
 
+def _write_youtube_cookies() -> str | None:
+    """
+    Write YOUTUBE_COOKIES env var content to a temp Netscape cookies file.
+    Returns the file path, or None if the env var isn't set.
+    The file persists for the dyno/process lifetime — safe to reuse across calls.
+    """
+    content = os.getenv("YOUTUBE_COOKIES", "").strip()
+    if not content:
+        return None
+    path = os.path.join(tempfile.gettempdir(), "abg_yt_cookies.txt")
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    return path
+
+
 def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
     import yt_dlp
-    return {
+    opts = {
         "format": fmt,
         "outtmpl": out_tmpl,
         "noplaylist": True,
@@ -89,14 +105,16 @@ def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
         },
-        # Use iOS/Android YouTube API clients so server IPs don't hit
-        # the "sign in to confirm you're not a bot" wall that blocks web requests
         "extractor_args": {
             "youtube": {
                 "player_client": ["ios", "android", "web"],
             },
         },
     }
+    cookie_file = _write_youtube_cookies()
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+    return opts
 
 
 def _translate_ydl_error(msg: str) -> str:
