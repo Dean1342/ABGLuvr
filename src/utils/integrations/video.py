@@ -162,41 +162,6 @@ async def download_video(url: str) -> tuple[str, dict]:
     return out_path, _extract_metadata(info, url)
 
 
-async def download_youtube_audio(url: str) -> tuple[str, dict]:
-    """
-    Download audio from YouTube using pytubefix.
-    Returns (file_path, metadata). Caller must delete the file in a finally block.
-    """
-    temp_id = str(uuid.uuid4())[:10]
-    tmp_dir = tempfile.gettempdir()
-
-    def _run():
-        from pytubefix import YouTube
-        yt = YouTube(url, 'WEB')
-        if yt.length and yt.length > MAX_DURATION_SECONDS:
-            raise ValueError("Video is too long — max 30 minutes.")
-        stream = yt.streams.get_audio_only()
-        if not stream:
-            raise ValueError("No audio stream found for this YouTube video.")
-        out_path = stream.download(output_path=tmp_dir, filename=f"abg_yt_{temp_id}.mp4")
-        metadata = {
-            "title":       yt.title or "YouTube Video",
-            "duration":    yt.length or 0,
-            "thumbnail":   yt.thumbnail_url,
-            "uploader":    yt.author or "",
-            "webpage_url": url,
-        }
-        return out_path, metadata
-
-    loop = asyncio.get_event_loop()
-    try:
-        return await loop.run_in_executor(None, _run)
-    except ValueError:
-        raise
-    except Exception as e:
-        raise ValueError(f"Could not download YouTube video: {str(e)[:200]}")
-
-
 def _extract_youtube_id(url: str) -> str | None:
     for pattern in (
         r'youtu\.be/([^?&\s/]+)',
@@ -209,11 +174,62 @@ def _extract_youtube_id(url: str) -> str | None:
     return None
 
 
+async def download_youtube_audio(url: str) -> tuple[str, dict]:
+    """
+    Download audio from YouTube using pytubefix.
+    Tries IOS → TV_EMBED → WEB clients in order; IOS/TV_EMBED bypass po_token requirement.
+    Returns (file_path, metadata). Caller must delete the file in a finally block.
+    """
+    temp_id = str(uuid.uuid4())[:10]
+    tmp_dir = tempfile.gettempdir()
+
+    def _run():
+        from pytubefix import YouTube
+
+        last_err = None
+        for client in ('IOS', 'TV_EMBED', 'WEB'):
+            try:
+                yt = YouTube(url, client)
+                if yt.length and yt.length > MAX_DURATION_SECONDS:
+                    raise ValueError("Video is too long — max 30 minutes.")
+                stream = yt.streams.get_audio_only()
+                if not stream:
+                    stream = yt.streams.filter(only_audio=True).first()
+                if not stream:
+                    last_err = ValueError("No audio stream found.")
+                    continue
+                out_path = stream.download(output_path=tmp_dir, filename=f"abg_yt_{temp_id}.mp4")
+                metadata = {
+                    "title":       yt.title or "YouTube Video",
+                    "duration":    yt.length or 0,
+                    "thumbnail":   yt.thumbnail_url,
+                    "uploader":    yt.author or "",
+                    "webpage_url": url,
+                }
+                print(f"[pytubefix] downloaded with client={client}")
+                return out_path, metadata
+            except ValueError:
+                raise
+            except Exception as e:
+                print(f"[pytubefix] client={client} failed: {str(e)[:200]}")
+                last_err = e
+                continue
+
+        raise ValueError(f"Could not download YouTube video: {str(last_err)[:200]}")
+
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(None, _run)
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Could not download YouTube video: {str(e)[:200]}")
+
+
 async def get_youtube_transcript(url: str) -> tuple[str, int] | tuple[None, None]:
     """
-    Fetch transcript from YouTube's caption system — no video download, no bot detection.
+    Fetch transcript from YouTube's caption system.
     Returns (transcript_text, duration_seconds) or (None, None) if unavailable.
-    Falls back to any available auto-generated language if English is missing.
     """
     video_id = _extract_youtube_id(url)
     if not video_id:
