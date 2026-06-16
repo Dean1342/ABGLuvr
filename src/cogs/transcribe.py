@@ -7,10 +7,9 @@ from typing import Literal
 from openai import AsyncOpenAI
 
 from utils.integrations.video import (
-    download_audio, download_video, download_youtube_audio,
+    download_audio, download_video,
     transcribe_audio, summarize_transcript,
     extract_frames, extract_url_from_text, normalize_url,
-    get_youtube_transcript, get_youtube_metadata,
 )
 
 # Platforms where we download full video and extract frames for visual context
@@ -117,16 +116,7 @@ async def _run_tldr(
 
     try:
         if platform == "YouTube":
-            await on_step("Fetching YouTube transcript...")
-            transcript, duration = await get_youtube_transcript(url)
-            if transcript:
-                metadata = await get_youtube_metadata(url)
-                metadata["duration"] = duration or 0
-            else:
-                await on_step("No captions found, downloading audio...")
-                media_path, metadata = await download_youtube_audio(url)
-                await on_step("Transcribing...")
-                transcript = await transcribe_audio(media_path, openai_client)
+            raise ValueError("YouTube isn't supported — try TikTok, Instagram, Twitter/X, or Reddit instead.")
 
         elif platform in _SHORT_FORM_PLATFORMS:
             await on_step(f"Downloading {platform} video...")

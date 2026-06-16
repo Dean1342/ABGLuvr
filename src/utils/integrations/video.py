@@ -4,7 +4,6 @@ import uuid
 import asyncio
 import base64
 import tempfile
-import httpx
 from openai import AsyncOpenAI
 
 MAX_DURATION_SECONDS = 1800   # 30-minute cap
@@ -160,126 +159,6 @@ async def download_video(url: str) -> tuple[str, dict]:
     if not out_path:
         raise ValueError("Video download failed — no output file was produced.")
     return out_path, _extract_metadata(info, url)
-
-
-def _extract_youtube_id(url: str) -> str | None:
-    for pattern in (
-        r'youtu\.be/([^?&\s/]+)',
-        r'[?&]v=([^&\s]+)',
-        r'youtube\.com/(?:shorts|embed|live)/([^?&\s/]+)',
-    ):
-        m = re.search(pattern, url, re.IGNORECASE)
-        if m:
-            return m.group(1)
-    return None
-
-
-async def download_youtube_audio(url: str) -> tuple[str, dict]:
-    """
-    Download audio from YouTube using pytubefix.
-    Tries IOS → TV_EMBED → WEB clients in order; IOS/TV_EMBED bypass po_token requirement.
-    Returns (file_path, metadata). Caller must delete the file in a finally block.
-    """
-    temp_id = str(uuid.uuid4())[:10]
-    tmp_dir = tempfile.gettempdir()
-
-    def _run():
-        from pytubefix import YouTube
-
-        last_err = None
-        for client in ('IOS', 'TV_EMBED', 'WEB'):
-            try:
-                yt = YouTube(url, client)
-                if yt.length and yt.length > MAX_DURATION_SECONDS:
-                    raise ValueError("Video is too long — max 30 minutes.")
-                stream = yt.streams.get_audio_only()
-                if not stream:
-                    stream = yt.streams.filter(only_audio=True).first()
-                if not stream:
-                    last_err = ValueError("No audio stream found.")
-                    continue
-                out_path = stream.download(output_path=tmp_dir, filename=f"abg_yt_{temp_id}.mp4")
-                metadata = {
-                    "title":       yt.title or "YouTube Video",
-                    "duration":    yt.length or 0,
-                    "thumbnail":   yt.thumbnail_url,
-                    "uploader":    yt.author or "",
-                    "webpage_url": url,
-                }
-                print(f"[pytubefix] downloaded with client={client}")
-                return out_path, metadata
-            except ValueError:
-                raise
-            except Exception as e:
-                print(f"[pytubefix] client={client} failed: {str(e)[:200]}")
-                last_err = e
-                continue
-
-        raise ValueError(f"Could not download YouTube video: {str(last_err)[:200]}")
-
-    loop = asyncio.get_event_loop()
-    try:
-        return await loop.run_in_executor(None, _run)
-    except ValueError:
-        raise
-    except Exception as e:
-        raise ValueError(f"Could not download YouTube video: {str(e)[:200]}")
-
-
-async def get_youtube_transcript(url: str) -> tuple[str, int] | tuple[None, None]:
-    """
-    Fetch transcript from YouTube's caption system.
-    Returns (transcript_text, duration_seconds) or (None, None) if unavailable.
-    """
-    video_id = _extract_youtube_id(url)
-    if not video_id:
-        return None, None
-
-    loop = asyncio.get_event_loop()
-
-    def _fetch():
-        from youtube_transcript_api import YouTubeTranscriptApi
-        api = YouTubeTranscriptApi()
-        try:
-            fetched = api.fetch(video_id, languages=["en", "en-US", "en-GB", "en-CA"])
-        except Exception:
-            try:
-                tl = api.list(video_id)
-                transcript_obj = next(iter(tl))
-                fetched = transcript_obj.fetch()
-            except Exception:
-                return None, None
-
-        snippets = list(fetched)
-        if not snippets:
-            return None, None
-
-        text     = " ".join(s.text for s in snippets).strip()
-        last     = snippets[-1]
-        duration = int(getattr(last, "start", 0) + getattr(last, "duration", 0))
-        return text, duration
-
-    return await loop.run_in_executor(None, _fetch)
-
-
-async def get_youtube_metadata(url: str, video_id: str | None = None) -> dict:
-    """Fetch YouTube title and thumbnail via oEmbed — no API key needed."""
-    vid = video_id or _extract_youtube_id(url) or ""
-    oembed = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            r = await client.get(oembed)
-            r.raise_for_status()
-            data = r.json()
-        return {
-            "title":       data.get("title", "YouTube Video"),
-            "duration":    0,
-            "thumbnail":   data.get("thumbnail_url"),
-            "uploader":    data.get("author_name", ""),
-            "webpage_url": url,
-        }
-    except Exception:
-        return {"title": "YouTube Video", "duration": 0, "thumbnail": None, "uploader": "", "webpage_url": url}
 
 
 def extract_frames(video_path: str, duration: int) -> list[str]:
