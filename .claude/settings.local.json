@@ -4,7 +4,9 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:cobalt.tools)",
       "WebFetch(domain:pytubefix.readthedocs.io)",
-      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install pytubefix nodejs-wheel-binaries)"
+      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install pytubefix nodejs-wheel-binaries)",
+      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -m pip uninstall opencv-python -y)",
+      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install opencv-python-headless)"
     ]
   }
 }

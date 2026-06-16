@@ -2,7 +2,7 @@ discord.py
 openai
 python-dotenv
 yt-dlp
-opencv-python
+opencv-python-headless
 youtube-transcript-api
 tiktoken
 httpx
