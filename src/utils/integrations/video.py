@@ -78,11 +78,16 @@ def _write_youtube_cookies() -> str | None:
     """
     content = os.getenv("YOUTUBE_COOKIES", "").strip()
     if not content:
+        print("[cookies] YOUTUBE_COOKIES env var is not set or empty — skipping")
         return None
     path = os.path.join(tempfile.gettempdir(), "abg_yt_cookies.txt")
     if not os.path.exists(path):
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
+        print(f"[cookies] wrote {len(content)} chars to {path}")
+        print(f"[cookies] first line: {content.splitlines()[0][:120]}")
+    else:
+        print(f"[cookies] reusing existing file at {path}")
     return path
 
 
