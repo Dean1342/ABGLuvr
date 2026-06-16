@@ -3,6 +3,7 @@ openai
 python-dotenv
 yt-dlp
 opencv-python
+youtube-transcript-api
 tiktoken
 httpx
 aiohttp

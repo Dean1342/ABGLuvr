@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from utils.integrations.video import (
     download_audio, download_video, transcribe_audio, summarize_transcript,
     extract_frames, extract_url_from_text, normalize_url,
+    get_youtube_transcript, get_youtube_metadata,
 )
 
 # Platforms where we download full video and extract frames for visual context
@@ -114,19 +115,35 @@ async def _run_tldr(
     used_vision = False
 
     try:
-        if platform in _SHORT_FORM_PLATFORMS:
+        if platform == "YouTube":
+            # Fetch captions directly — no download, no bot detection on server IPs
+            await on_step("Fetching YouTube transcript...")
+            transcript, duration = await get_youtube_transcript(url)
+            if transcript:
+                metadata = await get_youtube_metadata(url)
+                metadata["duration"] = duration or 0
+            else:
+                # No captions available — fall back to audio download
+                await on_step("No captions found, downloading audio...")
+                media_path, metadata = await download_audio(url)
+                await on_step("Transcribing...")
+                transcript = await transcribe_audio(media_path, openai_client)
+
+        elif platform in _SHORT_FORM_PLATFORMS:
             await on_step(f"Downloading {platform} video...")
             media_path, metadata = await download_video(url)
             duration = metadata.get("duration", 0) or 0
             if duration <= _SHORT_FORM_MAX_DURATION:
                 frames = extract_frames(media_path, duration)
                 used_vision = bool(frames)
+            await on_step("Transcribing...")
+            transcript = await transcribe_audio(media_path, openai_client)
+
         else:
             await on_step(f"Downloading {platform} audio...")
             media_path, metadata = await download_audio(url)
-
-        await on_step("Transcribing...")
-        transcript = await transcribe_audio(media_path, openai_client)
+            await on_step("Transcribing...")
+            transcript = await transcribe_audio(media_path, openai_client)
 
         if not transcript:
             raise ValueError("No speech detected in this video.")
