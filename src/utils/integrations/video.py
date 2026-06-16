@@ -115,8 +115,10 @@ def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
     if cookie_file:
         opts["cookiefile"] = cookie_file
     else:
-        # No cookies — use alternate player clients to reduce bot detection likelihood
         opts["extractor_args"] = {"youtube": {"player_client": ["ios", "android", "web"]}}
+    proxy = os.getenv("YOUTUBE_PROXY", "").strip()
+    if proxy:
+        opts["proxy"] = proxy
     return opts
 
 
@@ -129,8 +131,8 @@ def _translate_ydl_error(msg: str) -> str:
         return "That video is unavailable or has been removed."
     if "unexpected response" in msg.lower():
         return "Could not download — the platform blocked the request (bot detection). Try again in a moment."
-    if "sign in" in msg.lower() or "confirm" in msg.lower() and "bot" in msg.lower():
-        return "YouTube blocked the download (bot detection on server IPs). Try again — it often succeeds on retry."
+    if "sign in" in msg.lower() or ("confirm" in msg.lower() and "bot" in msg.lower()):
+        return "YouTube is blocking requests from this server's IP. A residential proxy (YOUTUBE_PROXY) is required to use YouTube on Heroku."
     return f"Could not download video: {msg[:200]}"
 
 
@@ -216,7 +218,19 @@ async def get_youtube_transcript(url: str) -> tuple[str, int] | tuple[None, None
 
     def _fetch():
         from youtube_transcript_api import YouTubeTranscriptApi
-        api = YouTubeTranscriptApi()
+
+        proxy_url = os.getenv("YOUTUBE_PROXY", "").strip()
+        if proxy_url:
+            try:
+                from youtube_transcript_api.proxies import GenericProxyConfig
+                api = YouTubeTranscriptApi(
+                    proxy_config=GenericProxyConfig(http=proxy_url, https=proxy_url)
+                )
+            except Exception:
+                api = YouTubeTranscriptApi()
+        else:
+            api = YouTubeTranscriptApi()
+
         try:
             fetched = api.fetch(video_id, languages=["en", "en-US", "en-GB", "en-CA"])
             print(f"[transcript] fetched English captions for {video_id}")
