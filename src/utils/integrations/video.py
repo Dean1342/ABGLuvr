@@ -217,15 +217,19 @@ async def get_youtube_transcript(url: str) -> tuple[str, int] | tuple[None, None
     def _fetch():
         from youtube_transcript_api import YouTubeTranscriptApi
         api = YouTubeTranscriptApi()
-        # Try English first, then fall back to any available transcript
         try:
             fetched = api.fetch(video_id, languages=["en", "en-US", "en-GB", "en-CA"])
-        except Exception:
+            print(f"[transcript] fetched English captions for {video_id}")
+        except Exception as e1:
+            print(f"[transcript] English fetch failed for {video_id}: {e1}")
             try:
                 tl = api.list(video_id)
+                available = [t.language_code for t in tl]
+                print(f"[transcript] available transcripts for {video_id}: {available}")
                 transcript_obj = next(iter(tl))
                 fetched = transcript_obj.fetch()
-            except Exception:
+            except Exception as e2:
+                print(f"[transcript] list/fetch fallback failed for {video_id}: {e2}")
                 return None, None
 
         snippets = list(fetched)
