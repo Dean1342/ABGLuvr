@@ -160,9 +160,9 @@ async def download_audio(url: str) -> tuple[str, dict]:
     temp_id  = str(uuid.uuid4())[:10]
     tmp_dir  = tempfile.gettempdir()
     out_tmpl = os.path.join(tmp_dir, f"abg_audio_{temp_id}.%(ext)s")
-    opts     = _build_ydl_opts(out_tmpl, "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp4]/bestaudio/best")
+    opts     = _build_ydl_opts(out_tmpl, "bestaudio/best")
 
-    info     = await _ydl_download(url, opts)
+    info = await _ydl_download(url, opts)
     out_path = _find_output_file(tmp_dir, temp_id, "abg_audio")
     if not out_path:
         raise ValueError("Audio download failed — no output file was produced.")
