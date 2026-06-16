@@ -2,6 +2,7 @@ discord.py
 openai
 python-dotenv
 yt-dlp
+pytubefix
 opencv-python
 youtube-transcript-api
 tiktoken

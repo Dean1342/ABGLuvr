@@ -70,30 +70,9 @@ def _extract_metadata(info: dict, fallback_url: str) -> dict:
     }
 
 
-def _write_youtube_cookies() -> str | None:
-    """
-    Write YOUTUBE_COOKIES env var content to a temp Netscape cookies file.
-    Returns the file path, or None if the env var isn't set.
-    The file persists for the dyno/process lifetime — safe to reuse across calls.
-    """
-    content = os.getenv("YOUTUBE_COOKIES", "").strip()
-    if not content:
-        print("[cookies] YOUTUBE_COOKIES env var is not set or empty — skipping")
-        return None
-    path = os.path.join(tempfile.gettempdir(), "abg_yt_cookies.txt")
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        print(f"[cookies] wrote {len(content)} chars to {path}")
-        print(f"[cookies] first line: {content.splitlines()[0][:120]}")
-    else:
-        print(f"[cookies] reusing existing file at {path}")
-    return path
-
-
 def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
     import yt_dlp
-    opts = {
+    return {
         "format": fmt,
         "outtmpl": out_tmpl,
         "noplaylist": True,
@@ -111,15 +90,6 @@ def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
             ),
         },
     }
-    cookie_file = _write_youtube_cookies()
-    if cookie_file:
-        opts["cookiefile"] = cookie_file
-    else:
-        opts["extractor_args"] = {"youtube": {"player_client": ["ios", "android", "web"]}}
-    proxy = os.getenv("YOUTUBE_PROXY", "").strip()
-    if proxy:
-        opts["proxy"] = proxy
-    return opts
 
 
 def _translate_ydl_error(msg: str) -> str:
@@ -132,7 +102,7 @@ def _translate_ydl_error(msg: str) -> str:
     if "unexpected response" in msg.lower():
         return "Could not download — the platform blocked the request (bot detection). Try again in a moment."
     if "sign in" in msg.lower() or ("confirm" in msg.lower() and "bot" in msg.lower()):
-        return "YouTube is blocking requests from this server's IP. A residential proxy (YOUTUBE_PROXY) is required to use YouTube on Heroku."
+        return "Could not download — the platform blocked the request (bot detection)."
     return f"Could not download video: {msg[:200]}"
 
 
@@ -192,6 +162,41 @@ async def download_video(url: str) -> tuple[str, dict]:
     return out_path, _extract_metadata(info, url)
 
 
+async def download_youtube_audio(url: str) -> tuple[str, dict]:
+    """
+    Download audio from YouTube using pytubefix.
+    Returns (file_path, metadata). Caller must delete the file in a finally block.
+    """
+    temp_id = str(uuid.uuid4())[:10]
+    tmp_dir = tempfile.gettempdir()
+
+    def _run():
+        from pytubefix import YouTube
+        yt = YouTube(url)
+        if yt.length and yt.length > MAX_DURATION_SECONDS:
+            raise ValueError("Video is too long — max 30 minutes.")
+        stream = yt.streams.get_audio_only()
+        if not stream:
+            raise ValueError("No audio stream found for this YouTube video.")
+        out_path = stream.download(output_path=tmp_dir, filename=f"abg_yt_{temp_id}.mp4")
+        metadata = {
+            "title":       yt.title or "YouTube Video",
+            "duration":    yt.length or 0,
+            "thumbnail":   yt.thumbnail_url,
+            "uploader":    yt.author or "",
+            "webpage_url": url,
+        }
+        return out_path, metadata
+
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(None, _run)
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Could not download YouTube video: {str(e)[:200]}")
+
+
 def _extract_youtube_id(url: str) -> str | None:
     for pattern in (
         r'youtu\.be/([^?&\s/]+)',
@@ -218,32 +223,15 @@ async def get_youtube_transcript(url: str) -> tuple[str, int] | tuple[None, None
 
     def _fetch():
         from youtube_transcript_api import YouTubeTranscriptApi
-
-        proxy_url = os.getenv("YOUTUBE_PROXY", "").strip()
-        if proxy_url:
-            try:
-                from youtube_transcript_api.proxies import GenericProxyConfig
-                api = YouTubeTranscriptApi(
-                    proxy_config=GenericProxyConfig(http=proxy_url, https=proxy_url)
-                )
-            except Exception:
-                api = YouTubeTranscriptApi()
-        else:
-            api = YouTubeTranscriptApi()
-
+        api = YouTubeTranscriptApi()
         try:
             fetched = api.fetch(video_id, languages=["en", "en-US", "en-GB", "en-CA"])
-            print(f"[transcript] fetched English captions for {video_id}")
-        except Exception as e1:
-            print(f"[transcript] English fetch failed for {video_id}: {e1}")
+        except Exception:
             try:
                 tl = api.list(video_id)
-                available = [t.language_code for t in tl]
-                print(f"[transcript] available transcripts for {video_id}: {available}")
                 transcript_obj = next(iter(tl))
                 fetched = transcript_obj.fetch()
-            except Exception as e2:
-                print(f"[transcript] list/fetch fallback failed for {video_id}: {e2}")
+            except Exception:
                 return None, None
 
         snippets = list(fetched)

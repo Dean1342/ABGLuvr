@@ -7,7 +7,8 @@ from typing import Literal
 from openai import AsyncOpenAI
 
 from utils.integrations.video import (
-    download_audio, download_video, transcribe_audio, summarize_transcript,
+    download_audio, download_video, download_youtube_audio,
+    transcribe_audio, summarize_transcript,
     extract_frames, extract_url_from_text, normalize_url,
     get_youtube_transcript, get_youtube_metadata,
 )
@@ -116,16 +117,14 @@ async def _run_tldr(
 
     try:
         if platform == "YouTube":
-            # Fetch captions directly — no download, no bot detection on server IPs
             await on_step("Fetching YouTube transcript...")
             transcript, duration = await get_youtube_transcript(url)
             if transcript:
                 metadata = await get_youtube_metadata(url)
                 metadata["duration"] = duration or 0
             else:
-                # No captions available — fall back to audio download
                 await on_step("No captions found, downloading audio...")
-                media_path, metadata = await download_audio(url)
+                media_path, metadata = await download_youtube_audio(url)
                 await on_step("Transcribing...")
                 transcript = await transcribe_audio(media_path, openai_client)
 
