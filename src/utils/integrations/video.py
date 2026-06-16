@@ -105,15 +105,13 @@ def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
         },
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["ios", "android", "web"],
-            },
-        },
     }
     cookie_file = _write_youtube_cookies()
     if cookie_file:
         opts["cookiefile"] = cookie_file
+    else:
+        # No cookies — use alternate player clients to reduce bot detection likelihood
+        opts["extractor_args"] = {"youtube": {"player_client": ["ios", "android", "web"]}}
     return opts
 
 
