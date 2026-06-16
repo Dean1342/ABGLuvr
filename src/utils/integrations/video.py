@@ -172,7 +172,7 @@ async def download_youtube_audio(url: str) -> tuple[str, dict]:
 
     def _run():
         from pytubefix import YouTube
-        yt = YouTube(url)
+        yt = YouTube(url, 'WEB')
         if yt.length and yt.length > MAX_DURATION_SECONDS:
             raise ValueError("Video is too long — max 30 minutes.")
         stream = yt.streams.get_audio_only()
