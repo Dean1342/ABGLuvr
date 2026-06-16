@@ -88,6 +88,13 @@ def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
         },
+        # Use iOS/Android YouTube API clients so server IPs don't hit
+        # the "sign in to confirm you're not a bot" wall that blocks web requests
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "android", "web"],
+            },
+        },
     }
 
 
@@ -99,7 +106,9 @@ def _translate_ydl_error(msg: str) -> str:
     if "not available" in msg.lower() or "removed" in msg.lower():
         return "That video is unavailable or has been removed."
     if "unexpected response" in msg.lower():
-        return "Could not download — the platform blocked the request (bot detection). Try again in a moment or use a direct link."
+        return "Could not download — the platform blocked the request (bot detection). Try again in a moment."
+    if "sign in" in msg.lower() or "confirm" in msg.lower() and "bot" in msg.lower():
+        return "YouTube blocked the download (bot detection on server IPs). Try again — it often succeeds on retry."
     return f"Could not download video: {msg[:200]}"
 
 
