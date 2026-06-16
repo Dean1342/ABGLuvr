@@ -142,9 +142,13 @@ async def _ydl_download(url: str, ydl_opts: dict) -> dict:
     try:
         return await loop.run_in_executor(None, _run)
     except yt_dlp.utils.DownloadError as e:
-        raise ValueError(_translate_ydl_error(str(e)))
+        raw = str(e)
+        print(f"[yt-dlp error] {raw[:500]}")
+        raise ValueError(_translate_ydl_error(raw))
     except Exception as e:
-        raise ValueError(f"Unexpected download error: {str(e)[:200]}")
+        raw = str(e)
+        print(f"[yt-dlp unexpected] {raw[:500]}")
+        raise ValueError(f"Unexpected download error: {raw[:200]}")
 
 
 async def download_audio(url: str) -> tuple[str, dict]:
