@@ -49,3 +49,6 @@ Custom Personas/Prompt Files/Lemon/*
 
 # Spotify user tokens (sensitive)
 src/utils/integrations/spotify/spotify_users.json
+
+Logs/
+CLAUDE.md

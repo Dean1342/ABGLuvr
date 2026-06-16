@@ -1,6 +1,8 @@
 discord.py
 openai
 python-dotenv
+yt-dlp
+opencv-python
 tiktoken
 httpx
 aiohttp

@@ -70,6 +70,12 @@ class MyBot(commands.Bot):
         except Exception as e:
             import traceback
             traceback.print_exc()
+        try:
+            from cogs.transcribe import Transcribe
+            await self.add_cog(Transcribe(self))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
 
 # Initialize bot
 bot = MyBot(command_prefix="/", intents=intents)
@@ -179,6 +185,12 @@ async def on_message(message: discord.Message):
             except Exception as e:
                 # Log error but continue with normal processing
                 print(f"Error fixing social media links: {e}")
+
+    # TLDR mention shortcut — intercept before channel restrictions and LLM pipeline
+    if bot.user in message.mentions and re.search(r'/tldr', message.content, re.IGNORECASE):
+        from cogs.transcribe import handle_tldr_mention
+        await handle_tldr_mention(message)
+        return
 
     # Channel restrictions and mention override (for normal bot functionality)
     channel_ids = os.getenv("CHANNEL_IDS", os.getenv("CHANNEL_ID", ""))
