@@ -114,7 +114,9 @@ async def _ydl_download(url: str, ydl_opts: dict) -> dict:
 
     loop = asyncio.get_event_loop()
     try:
-        return await loop.run_in_executor(None, _run)
+        info = await loop.run_in_executor(None, _run)
+        print(f"[yt-dlp] ext={info.get('ext')} vcodec={info.get('vcodec')} acodec={info.get('acodec')} filesize={info.get('filesize')}")
+        return info
     except yt_dlp.utils.DownloadError as e:
         raw = str(e)
         print(f"[yt-dlp error] {raw[:500]}")
@@ -134,7 +136,7 @@ async def download_audio(url: str) -> tuple[str, dict]:
     temp_id  = str(uuid.uuid4())[:10]
     tmp_dir  = tempfile.gettempdir()
     out_tmpl = os.path.join(tmp_dir, f"abg_audio_{temp_id}.%(ext)s")
-    opts     = _build_ydl_opts(out_tmpl, "bestaudio/best")
+    opts     = _build_ydl_opts(out_tmpl, "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp3]/bestaudio[ext=mp4]/bestaudio/best[vcodec^=avc][acodec!=none]/best[vcodec!*=hev][vcodec!*=265][acodec!=none]/best")
 
     info = await _ydl_download(url, opts)
     out_path = _find_output_file(tmp_dir, temp_id, "abg_audio")
@@ -152,7 +154,7 @@ async def download_video(url: str) -> tuple[str, dict]:
     temp_id  = str(uuid.uuid4())[:10]
     tmp_dir  = tempfile.gettempdir()
     out_tmpl = os.path.join(tmp_dir, f"abg_video_{temp_id}.%(ext)s")
-    opts     = _build_ydl_opts(out_tmpl, "best[ext=mp4]/best")
+    opts     = _build_ydl_opts(out_tmpl, "best[ext=mp4][vcodec^=avc][acodec!=none]/best[ext=mp4][vcodec!*=hev][vcodec!*=265][acodec!=none]/best[acodec!=none]/best")
 
     info     = await _ydl_download(url, opts)
     out_path = _find_output_file(tmp_dir, temp_id, "abg_video")
@@ -216,6 +218,7 @@ def extract_frames(video_path: str, duration: int) -> list[str]:
 
 async def transcribe_audio(path: str, openai_client: AsyncOpenAI) -> str:
     """Send an audio or video file to OpenAI Whisper API, return transcript text."""
+    print(f"[whisper] sending file: {path} ({os.path.getsize(path)} bytes)")
     with open(path, "rb") as f:
         response = await openai_client.audio.transcriptions.create(
             model="whisper-1",

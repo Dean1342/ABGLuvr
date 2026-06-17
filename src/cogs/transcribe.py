@@ -126,7 +126,21 @@ async def _run_tldr(
                 frames = extract_frames(media_path, duration)
                 used_vision = bool(frames)
             await on_step("Transcribing...")
-            transcript = await transcribe_audio(media_path, openai_client)
+            try:
+                transcript = await transcribe_audio(media_path, openai_client)
+            except Exception as whisper_err:
+                # Video file has no audio track or unsupported format — retry audio-only
+                print(f"[tldr] video transcribe failed ({whisper_err}), retrying audio-only")
+                await on_step("Retrying with audio download...")
+                audio_path = None
+                try:
+                    audio_path, _ = await download_audio(url)
+                    transcript = await transcribe_audio(audio_path, openai_client)
+                except Exception as e:
+                    raise ValueError(f"Could not transcribe video: {e}") from None
+                finally:
+                    if audio_path and os.path.exists(audio_path):
+                        os.remove(audio_path)
 
         else:
             await on_step(f"Downloading {platform} audio...")
