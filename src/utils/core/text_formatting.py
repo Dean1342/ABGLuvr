@@ -42,8 +42,9 @@ def fix_social_media_links(text):
         r'https?://(?:www\.)?tnktok\.com',
         r'https?://kkinstagram\.com',
         r'https?://(?:www\.)?vxreddit\.com',
+        r'https?://open\.fxspotify\.com',
     ]
-    
+
     for pattern in fixed_patterns:
         if re.search(pattern, text, re.IGNORECASE):
             return text, False
@@ -147,6 +148,18 @@ def fix_social_media_links(text):
         
         text = re.sub(pattern, replace_other_x_fix, text, flags=re.IGNORECASE)
     
+    # Spotify link patterns — rewrite to fxspotify and strip ?si= tracking params
+    spotify_patterns = [
+        r'https?://open\.spotify\.com/([^?\s]+)(?:\?[^\s]*)?',
+    ]
+    for pattern in spotify_patterns:
+        def replace_spotify_link(match):
+            nonlocal changed
+            changed = True
+            path = match.group(1).rstrip('/')
+            return f"https://open.fxspotify.com/{path}"
+        text = re.sub(pattern, replace_spotify_link, text, flags=re.IGNORECASE)
+
     return text, changed
 
 def contains_social_media_links(text):
@@ -163,8 +176,9 @@ def contains_social_media_links(text):
         r'https?://(?:www\.|m\.)?instagram\.com/(?:reel|p|tv)/',  # Only detect reel/post/tv links
         r'https?://(?:www\.|m\.)?reddit\.com/',
         r'https?://(?:vx|fx|twittpr|nitter)\.[\w.]+',
+        r'https?://open\.spotify\.com/',
     ]
-    
+
     # Patterns to detect already-fixed links (don't process these)
     fixed_patterns = [
         r'https?://fixupx\.com',
@@ -172,6 +186,7 @@ def contains_social_media_links(text):
         r'https?://kkinstagram\.com',
         r'https?://(?:www\.)?ddinstagram\.com',  # Legacy support
         r'https?://(?:www\.)?vxreddit\.com',
+        r'https?://open\.fxspotify\.com',
     ]
     
     # Check if any fixed links exist - if so, don't process

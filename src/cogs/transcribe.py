@@ -7,7 +7,7 @@ from typing import Literal
 from openai import AsyncOpenAI
 
 from utils.integrations.video import (
-    download_audio, download_video,
+    download_audio, download_video, download_instagram_video, download_attachment,
     transcribe_audio, summarize_transcript,
     extract_frames, extract_url_from_text, normalize_url,
 )
@@ -15,6 +15,17 @@ from utils.integrations.video import (
 # Platforms where we download full video and extract frames for visual context
 _SHORT_FORM_PLATFORMS = {"TikTok", "Instagram", "Twitter/X"}
 _SHORT_FORM_MAX_DURATION = 180  # seconds
+
+# TLDR result cache keyed by Discord message ID — used for video conversation context
+tldr_results: dict[int, dict] = {}
+_TLDR_MAX_CACHE = 100
+
+
+def _store_tldr_result(msg_id: int, transcript: str, metadata: dict, summary: str) -> None:
+    if len(tldr_results) >= _TLDR_MAX_CACHE:
+        oldest = next(iter(tldr_results))
+        del tldr_results[oldest]
+    tldr_results[msg_id] = {"transcript": transcript, "metadata": metadata, "summary": summary}
 
 
 def _detect_platform(url: str) -> str:
@@ -103,10 +114,10 @@ async def _run_tldr(
     include_transcript: bool,
     openai_client: AsyncOpenAI,
     on_step,   # async callable(str) for progress updates
-) -> tuple[discord.Embed, list[discord.File]]:
+) -> tuple[discord.Embed, list[discord.File], str, dict, str]:
     """
-    Core TLDR pipeline shared by all three invocation modes.
-    Calls on_step(text) to push progress updates to the caller.
+    Core TLDR pipeline shared by all invocation modes.
+    Returns (embed, files, transcript, metadata, summary).
     Raises ValueError for user-facing errors, Exception for unexpected failures.
     """
     platform   = _detect_platform(url)
@@ -120,7 +131,10 @@ async def _run_tldr(
 
         elif platform in _SHORT_FORM_PLATFORMS:
             await on_step(f"Downloading {platform} video...")
-            media_path, metadata = await download_video(url)
+            if platform == "Instagram":
+                media_path, metadata = await download_instagram_video(url)
+            else:
+                media_path, metadata = await download_video(url)
             duration = metadata.get("duration", 0) or 0
             if duration <= _SHORT_FORM_MAX_DURATION:
                 frames = extract_frames(media_path, duration)
@@ -157,14 +171,84 @@ async def _run_tldr(
             frames=frames or None,
         )
 
-        return _build_tldr_embed(
+        emb, files = _build_tldr_embed(
             summary, metadata, mode, platform,
             transcript, include_transcript, used_vision,
         )
+        return emb, files, transcript, metadata, summary
 
     finally:
         if media_path and os.path.exists(media_path):
             os.remove(media_path)
+
+
+async def _run_tldr_attachment(
+    attachment: discord.Attachment,
+    mode: str,
+    include_transcript: bool,
+    openai_client: AsyncOpenAI,
+    on_step,
+) -> tuple[discord.Embed, list[discord.File], str, dict, str]:
+    """
+    TLDR pipeline for Discord-uploaded video/audio files.
+    Returns (embed, files, transcript, metadata, summary).
+    """
+    if attachment.size > 25 * 1024 * 1024:
+        raise ValueError(f"File too large — max 25 MB (this file is {attachment.size // (1024 * 1024)} MB).")
+    ct = (attachment.content_type or "").lower()
+    is_video = ct.startswith("video/")
+    is_audio = ct.startswith("audio/")
+    if not (is_video or is_audio):
+        raise ValueError("Attachment must be a video or audio file.")
+
+    await on_step("Downloading attachment...")
+    path = None
+    try:
+        path = await download_attachment(attachment.url, attachment.filename)
+        metadata: dict = {
+            "title": attachment.filename,
+            "duration": None,
+            "thumbnail": None,
+            "uploader": "",
+            "webpage_url": attachment.url,
+        }
+
+        frames: list[str] = []
+        if is_video:
+            try:
+                import cv2
+                cap = cv2.VideoCapture(path)
+                fps = cap.get(cv2.CAP_PROP_FPS) or 25
+                total = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                cap.release()
+                duration = int(total / fps) if fps else 0
+                metadata["duration"] = duration
+                if duration <= _SHORT_FORM_MAX_DURATION:
+                    frames = extract_frames(path, duration)
+            except ImportError:
+                pass
+
+        await on_step("Transcribing...")
+        transcript = await transcribe_audio(path, openai_client)
+        if not transcript:
+            raise ValueError("No speech detected in this file.")
+
+        await on_step("Generating summary...")
+        summary = await summarize_transcript(
+            transcript, metadata, mode, openai_client,
+            frames=frames or None,
+        )
+
+        platform = "Video" if is_video else "Audio"
+        emb, files = _build_tldr_embed(
+            summary, metadata, mode, platform,
+            transcript, include_transcript, bool(frames),
+        )
+        return emb, files, transcript, metadata, summary
+
+    finally:
+        if path and os.path.exists(path):
+            os.remove(path)
 
 
 class Transcribe(commands.Cog):
@@ -173,10 +257,11 @@ class Transcribe(commands.Cog):
 
     @app_commands.command(
         name="tldr",
-        description="Transcribe and summarize a video from YouTube, TikTok, Twitter/X, Instagram, Reddit, and more.",
+        description="Transcribe and summarize a video from TikTok, Twitter/X, Instagram, Reddit, or an uploaded file.",
     )
     @app_commands.describe(
         url="Link to the video — leave blank to use the most recent video link in this channel",
+        attachment="Upload a video or audio file directly to transcribe",
         mode="Summary length — brief bullet points (default) or detailed paragraphs",
         include_transcript="Also attach the full raw transcript alongside the summary",
     )
@@ -184,6 +269,7 @@ class Transcribe(commands.Cog):
         self,
         interaction: discord.Interaction,
         url: str = None,
+        attachment: discord.Attachment = None,
         mode: Literal["brief", "detailed"] = "brief",
         include_transcript: bool = False,
     ):
@@ -193,24 +279,31 @@ class Transcribe(commands.Cog):
         try:
             openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=120.0)
 
-            if url is None:
-                await progress.edit(content="Searching for recent video link...")
-                url = await _find_recent_video_url(interaction.channel)
-                if url is None:
-                    await progress.edit(content="No recent video link found in this channel. Provide a URL directly.")
-                    return
-
-            url = normalize_url(url)
-
             async def update(text: str):
                 await progress.edit(content=text)
 
-            emb, files = await _run_tldr(url, mode, include_transcript, openai_client, on_step=update)
+            if attachment is not None:
+                emb, files, transcript, metadata, summary = await _run_tldr_attachment(
+                    attachment, mode, include_transcript, openai_client, on_step=update
+                )
+            else:
+                if url is None:
+                    await progress.edit(content="Searching for recent video link...")
+                    url = await _find_recent_video_url(interaction.channel)
+                    if url is None:
+                        await progress.edit(content="No recent video link found. Provide a URL or upload a file.")
+                        return
+                url = normalize_url(url)
+                emb, files, transcript, metadata, summary = await _run_tldr(
+                    url, mode, include_transcript, openai_client, on_step=update
+                )
+
             # progress IS the original deferred response — edit it in-place to the final embed
             if files:
                 await progress.edit(content=None, embed=emb, attachments=files)
             else:
                 await progress.edit(content=None, embed=emb)
+            _store_tldr_result(progress.id, transcript, metadata, summary)
 
         except ValueError as e:
             await progress.edit(content=f"Error: {e}")
@@ -227,15 +320,74 @@ async def setup(bot):
 
 async def handle_tldr_mention(message: discord.Message) -> None:
     """
-    Handles `@abgluvr /tldr [-detailed] [-transcript]` sent as a reply to a video message.
-    Called from on_message before the LLM pipeline.
+    Handles `@abgluvr /tldr [-detailed] [-transcript]` in any of these forms:
+      - Current message contains a video URL  (e.g. "@bot /tldr https://tiktok.com/...")
+      - Current message has a video attachment (e.g. "@bot /tldr" + uploaded file)
+      - Reply to a message with a video URL or embed
+      - Reply to a message with a video attachment
 
     Flags (any order, case-insensitive):
       -detailed    → mode="detailed"  (default: "brief")
       -transcript  → include_transcript=True
     """
+    content_lower      = (message.content or "").lower()
+    mode               = "detailed" if "-detailed" in content_lower else "brief"
+    include_transcript = "-transcript" in content_lower
+    openai_client      = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=120.0)
+
+    async def _send_url(url: str) -> None:
+        url = normalize_url(url)
+        progress = await message.channel.send(f"Downloading {_detect_platform(url)} video...")
+        try:
+            async def update(text: str):
+                await progress.edit(content=text)
+            emb, files, transcript, metadata, summary = await _run_tldr(
+                url, mode, include_transcript, openai_client, on_step=update
+            )
+            await progress.delete()
+            sent = await message.channel.send(embed=emb, files=files)
+            _store_tldr_result(sent.id, transcript, metadata, summary)
+        except ValueError as e:
+            await progress.edit(content=f"Error: {e}")
+        except Exception as e:
+            print(f"[tldr mention url] Unexpected error: {e}")
+            await progress.edit(content="Something went wrong. The video may be unavailable or unsupported.")
+
+    async def _send_attachment(att: discord.Attachment) -> None:
+        progress = await message.channel.send("Processing attachment...")
+        try:
+            async def update(text: str):
+                await progress.edit(content=text)
+            emb, files, transcript, metadata, summary = await _run_tldr_attachment(
+                att, mode, include_transcript, openai_client, on_step=update
+            )
+            await progress.delete()
+            sent = await message.channel.send(embed=emb, files=files)
+            _store_tldr_result(sent.id, transcript, metadata, summary)
+        except ValueError as e:
+            await progress.edit(content=f"Error: {e}")
+        except Exception as e:
+            print(f"[tldr mention attachment] Unexpected error: {e}")
+            await progress.edit(content="Something went wrong processing the attachment.")
+
+    # 1. URL in the current message (user typed the link alongside @bot /tldr)
+    url = extract_url_from_text(message.content or "")
+    if url:
+        await _send_url(url)
+        return
+
+    # 2. Attachment on the current message (user uploaded a file alongside @bot /tldr)
+    for att in message.attachments:
+        ct = (att.content_type or "").lower()
+        if ct.startswith("video/") or ct.startswith("audio/"):
+            await _send_attachment(att)
+            return
+
+    # 3. Replied-to message — check URL then attachment
     if not message.reference:
-        await message.reply("Reply to a message containing a video link to use this.")
+        await message.reply(
+            "Include a video URL, attach a file, or reply to a message containing a video link."
+        )
         return
 
     try:
@@ -244,36 +396,23 @@ async def handle_tldr_mention(message: discord.Message) -> None:
         await message.reply("Could not find the message you replied to.")
         return
 
-    # Try plain text first, then embed URLs (bot's own fixed-link messages use embeds)
+    # URL from ref text first, then embed URLs (bot resends fixed links via embeds)
     url = extract_url_from_text(ref_msg.content or "")
     if not url:
         for embed in ref_msg.embeds:
             if embed.url:
                 url = embed.url
                 break
-    if not url:
-        await message.reply("No video link found in the message you replied to.")
+
+    if url:
+        await _send_url(url)
         return
 
-    url               = normalize_url(url)
-    content_lower     = message.content.lower()
-    mode              = "detailed" if "-detailed" in content_lower else "brief"
-    include_transcript = "-transcript" in content_lower
+    # Attachment on the referenced message
+    for att in ref_msg.attachments:
+        ct = (att.content_type or "").lower()
+        if ct.startswith("video/") or ct.startswith("audio/"):
+            await _send_attachment(att)
+            return
 
-    progress = await message.channel.send(f"Downloading {_detect_platform(url)} video...")
-
-    try:
-        openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=120.0)
-
-        async def update(text: str):
-            await progress.edit(content=text)
-
-        emb, files = await _run_tldr(url, mode, include_transcript, openai_client, on_step=update)
-        await progress.delete()
-        await message.channel.send(embed=emb, files=files)
-
-    except ValueError as e:
-        await progress.edit(content=f"Error: {e}")
-    except Exception as e:
-        print(f"[tldr mention] Unexpected error: {e}")
-        await progress.edit(content="Something went wrong. The video may be unavailable or unsupported.")
+    await message.reply("No video link or attachment found in the message you replied to.")

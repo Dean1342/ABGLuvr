@@ -98,6 +98,14 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
+    # TLDR mention shortcut — run BEFORE the link fixer, but don't return yet so the
+    # fixer can still clean up the raw social media URL in the same message
+    is_tldr = bot.user in message.mentions and re.search(r'/tldr', message.content or '', re.IGNORECASE)
+    if is_tldr:
+        from cogs.transcribe import handle_tldr_mention
+        await handle_tldr_mention(message)
+        # fall through to link fixer below
+
     # Check for social media links that need fixing FIRST (before any channel restrictions)
     if message.content and contains_social_media_links(message.content):
         fixed_content, link_changed = fix_social_media_links(message.content)
@@ -186,11 +194,8 @@ async def on_message(message: discord.Message):
                 # Log error but continue with normal processing
                 print(f"Error fixing social media links: {e}")
 
-    # TLDR mention shortcut — intercept before channel restrictions and LLM pipeline
-    if bot.user in message.mentions and re.search(r'/tldr', message.content, re.IGNORECASE):
-        from cogs.transcribe import handle_tldr_mention
-        await handle_tldr_mention(message)
-        return
+    if is_tldr:
+        return  # skip LLM pipeline (link fixer already returned if it ran)
 
     # Channel restrictions and mention override (for normal bot functionality)
     channel_ids = os.getenv("CHANNEL_IDS", os.getenv("CHANNEL_ID", ""))
@@ -212,6 +217,29 @@ async def on_message(message: discord.Message):
     )
 
     active_conv_key = foreign_conv_key if use_foreign_convo else conv_key
+
+    # Inject TLDR video context when user replies to a TLDR embed
+    if message.reference and message.reference.message_id:
+        try:
+            from cogs.transcribe import tldr_results
+            ref_id = message.reference.message_id
+            if ref_id in tldr_results:
+                result = tldr_results[ref_id]
+                marker = f"[TLDR:{ref_id}]"
+                conv = user_conversations.get(active_conv_key, [])
+                if not any(marker in (m.get("content") or "") for m in conv):
+                    title = result["metadata"].get("title", "Unknown")
+                    ctx_block = (
+                        f"{marker}\nThe user is asking about a video they TLDRed.\n"
+                        f"Title: \"{title}\"\nTranscript:\n{result['transcript'][:8000]}"
+                    )
+                    insert_at = 1 if len(conv) > 0 else 0
+                    conv.insert(insert_at, {"role": "system", "content": ctx_block})
+                    conv.insert(insert_at + 1, {"role": "assistant", "content": result["summary"]})
+                    user_conversations[active_conv_key] = conv
+        except Exception:
+            pass  # never let this block the normal message pipeline
+
     persona = user_personas.get(active_conv_key, "Default")
     
     # Get system prompt and model

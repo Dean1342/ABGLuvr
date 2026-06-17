@@ -216,6 +216,122 @@ def extract_frames(video_path: str, duration: int) -> list[str]:
     return frames_b64
 
 
+def _carousel_match_filter(info_dict, *, incomplete=False):
+    """
+    Duration filter for individual carousel entries.
+    Unlike the standard match_filter_func, this accepts entries where duration is
+    unknown (None) — common for carousel slides fetched via playlist_items.
+    """
+    duration = info_dict.get("duration")
+    if duration is not None and duration > MAX_DURATION_SECONDS:
+        return f"Video is too long — max {MAX_DURATION_SECONDS // 60} minutes."
+    return None  # accept (None duration = unknown, not too long)
+
+
+async def download_instagram_video(url: str) -> tuple[str, dict]:
+    """
+    Download the first video from an Instagram post, handling carousels.
+
+    Root cause of carousel issues: yt-dlp's match_filter_func("duration <= N") rejects
+    entries where duration is None (common for individual carousel slides fetched via
+    playlist_items). This causes every slide to be skipped. We use a custom match_filter
+    that accepts None-duration entries instead.
+
+    Image slides download as jpg/png which _find_output_file doesn't match (it only
+    looks for video extensions), so they're naturally skipped.
+    """
+    import yt_dlp
+
+    _headers = _build_ydl_opts("", "")["http_headers"]
+
+    def _count_entries():
+        opts = {
+            "noplaylist": False,
+            "extract_flat": True,
+            "quiet": True,
+            "no_warnings": True,
+            "http_headers": _headers,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    loop = asyncio.get_event_loop()
+    try:
+        peek = await loop.run_in_executor(None, _count_entries)
+    except Exception:
+        return await download_video(url)
+
+    entries = peek.get("entries")
+    if not entries:
+        return await download_video(url)  # single post, not a carousel
+
+    n = len(entries)
+    fmt = (
+        "best[ext=mp4][vcodec^=avc][acodec!=none]"
+        "/best[ext=mp4][vcodec!*=hev][vcodec!*=265][acodec!=none]"
+        "/best[acodec!=none]/best"
+    )
+
+    print(f"[instagram] carousel with {n} entries, searching for first video slide")
+
+    for i in range(1, n + 1):
+        temp_id  = str(uuid.uuid4())[:10]
+        tmp_dir  = tempfile.gettempdir()
+        out_tmpl = os.path.join(tmp_dir, f"abg_video_{temp_id}.%(ext)s")
+
+        # Build opts manually — do NOT use _build_ydl_opts which has match_filter_func
+        # that rejects entries with duration=None (carousel slides often lack duration)
+        opts = {
+            "format": fmt,
+            "outtmpl": out_tmpl,
+            "noplaylist": False,
+            "playlist_items": str(i),
+            "quiet": True,
+            "no_warnings": True,
+            "max_filesize": MAX_FILESIZE_BYTES,
+            "match_filter": _carousel_match_filter,
+            "http_headers": _headers,
+        }
+
+        try:
+            item_info = await _ydl_download(url, opts)
+        except ValueError as e:
+            print(f"[instagram] slide {i} skipped: {e}")
+            continue
+
+        # _find_output_file only matches video extensions — image slides (jpg/png/webp)
+        # download under a non-matching extension so out_path=None → skip naturally
+        out_path = _find_output_file(tmp_dir, temp_id, "abg_video")
+        if not out_path:
+            print(f"[instagram] slide {i} was an image, skipping")
+            continue
+
+        print(f"[instagram] slide {i} is a video, using it")
+        # When playlist_items selects one entry, info may be the playlist wrapper dict
+        entry_info = item_info
+        if item_info.get("entries"):
+            entry_info = item_info["entries"][0]
+
+        return out_path, _extract_metadata(entry_info, url)
+
+    raise ValueError("No video slide found in this Instagram carousel.")
+
+
+async def download_attachment(url: str, filename: str) -> str:
+    """Download a Discord CDN attachment to a temp file. Returns the file path."""
+    import aiohttp
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp4"
+    temp_id = str(uuid.uuid4())[:10]
+    out_path = os.path.join(tempfile.gettempdir(), f"abg_attach_{temp_id}.{ext}")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise ValueError(f"Could not download attachment (HTTP {resp.status})")
+            with open(out_path, "wb") as f:
+                f.write(await resp.read())
+    return out_path
+
+
 async def transcribe_audio(path: str, openai_client: AsyncOpenAI) -> str:
     """Send an audio or video file to OpenAI Whisper API, return transcript text."""
     print(f"[whisper] sending file: {path} ({os.path.getsize(path)} bytes)")
