@@ -6,7 +6,20 @@
       "WebFetch(domain:pytubefix.readthedocs.io)",
       "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install pytubefix nodejs-wheel-binaries)",
       "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -m pip uninstall opencv-python -y)",
-      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install opencv-python-headless)"
+      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install opencv-python-headless)",
+      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\pip.exe\" install supabase matplotlib)",
+      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -c \"import sys; print\\(sys.executable\\)\")",
+      "PowerShell(python -c \"import sys; print\\(sys.executable\\)\")",
+      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -c \"import supabase; print\\(supabase.__version__\\)\")",
+      "PowerShell(& \"D:\\\\Disc Bots\\\\SandBox\\\\ABGLuvr\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install supabase matplotlib)",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(.venv/Scripts/python -c \"import av; print\\('av', av.__version__\\)\")",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/pip.exe\" install av)",
+      "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe\" -c \"import av; print\\('av', av.__version__\\)\")",
+      "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/pip.exe\" --version)",
+      "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe\" -c \"import site; print\\(site.getsitepackages\\(\\)\\)\")",
+      "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe\" -m pip install av)"
     ]
   }
 }

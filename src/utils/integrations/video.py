@@ -7,7 +7,6 @@ import tempfile
 from openai import AsyncOpenAI
 
 MAX_DURATION_SECONDS = 1800   # 30-minute cap
-MAX_FILESIZE_BYTES   = 24 * 1024 * 1024  # 24 MB (Whisper hard limit is 25 MB)
 
 # Matches original and bot-proxy video URLs in plain text
 _VIDEO_URL_RE = re.compile(
@@ -80,7 +79,6 @@ def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
         "match_filter": yt_dlp.utils.match_filter_func(
             f"duration <= {MAX_DURATION_SECONDS}"
         ),
-        "max_filesize": MAX_FILESIZE_BYTES,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -288,7 +286,6 @@ async def download_instagram_video(url: str) -> tuple[str, dict]:
             "playlist_items": str(i),
             "quiet": True,
             "no_warnings": True,
-            "max_filesize": MAX_FILESIZE_BYTES,
             "match_filter": _carousel_match_filter,
             "http_headers": _headers,
         }
@@ -332,9 +329,60 @@ async def download_attachment(url: str, filename: str) -> str:
     return out_path
 
 
+_WHISPER_MAX_BYTES = 25 * 1024 * 1024  # Whisper API hard limit
+
+
+def _extract_audio_track_sync(video_path: str) -> str:
+    """
+    Decode audio from a video file and re-encode as AAC in an mp4 container.
+    Produces a small audio-only file (~2 MB from a 27 MB combined mp4).
+    Uses PyAV (bundled FFmpeg libs — no system ffmpeg binary needed).
+    """
+    import av  # pip install av
+    temp_id     = str(uuid.uuid4())[:10]
+    out_path    = os.path.join(tempfile.gettempdir(), f"abg_audio_{temp_id}.mp4")
+
+    with av.open(video_path) as in_c:
+        audio_streams = [s for s in in_c.streams if s.type == "audio"]
+        if not audio_streams:
+            raise ValueError("No audio track found in this video.")
+        in_stream   = audio_streams[0]
+        in_ctx      = in_stream.codec_context
+        sample_rate = in_ctx.sample_rate or 44100
+        channels    = getattr(in_ctx, "channels", None) or 2
+
+        layout_str = "stereo" if channels >= 2 else "mono"
+        with av.open(out_path, "w", format="mp4") as out_c:
+            out_stream                        = out_c.add_stream("aac", rate=sample_rate)
+            out_stream.codec_context.layout   = layout_str
+            out_stream.codec_context.bit_rate = 128_000
+
+            for frame in in_c.decode(in_stream):
+                frame.pts = None  # let encoder assign PTS
+                for packet in out_stream.encode(frame):
+                    out_c.mux(packet)
+
+            for packet in out_stream.encode(None):  # flush
+                out_c.mux(packet)
+
+    return out_path
+
+
+async def extract_audio_track(video_path: str) -> str:
+    """Async wrapper around _extract_audio_track_sync — runs in a thread executor."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _extract_audio_track_sync, video_path)
+
+
 async def transcribe_audio(path: str, openai_client: AsyncOpenAI) -> str:
     """Send an audio or video file to OpenAI Whisper API, return transcript text."""
-    print(f"[whisper] sending file: {path} ({os.path.getsize(path)} bytes)")
+    file_size = os.path.getsize(path)
+    print(f"[whisper] sending file: {path} ({file_size} bytes)")
+    if file_size > _WHISPER_MAX_BYTES:
+        raise ValueError(
+            f"File is {file_size // (1024 * 1024)} MB — too large for Whisper (max 25 MB). "
+            "Try a shorter video."
+        )
     with open(path, "rb") as f:
         response = await openai_client.audio.transcriptions.create(
             model="whisper-1",

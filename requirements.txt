@@ -14,4 +14,7 @@ beautifulsoup4
 pdfplumber
 python-docx
 openpyxl
+supabase
+matplotlib
+av
 # For playwright, after install, run: playwright install

@@ -9,12 +9,13 @@ from openai import AsyncOpenAI
 from utils.integrations.video import (
     download_audio, download_video, download_instagram_video, download_attachment,
     transcribe_audio, summarize_transcript,
-    extract_frames, extract_url_from_text, normalize_url,
+    extract_frames, extract_url_from_text, normalize_url, extract_audio_track,
 )
 
 # Platforms where we download full video and extract frames for visual context
 _SHORT_FORM_PLATFORMS = {"TikTok", "Instagram", "Twitter/X"}
 _SHORT_FORM_MAX_DURATION = 180  # seconds
+_WHISPER_SIZE_LIMIT = 25 * 1024 * 1024  # 25 MB — Whisper API hard limit
 
 # TLDR result cache keyed by Discord message ID — used for video conversation context
 tldr_results: dict[int, dict] = {}
@@ -131,24 +132,58 @@ async def _run_tldr(
 
         elif platform in _SHORT_FORM_PLATFORMS:
             await on_step(f"Downloading {platform} video...")
-            if platform == "Instagram":
-                media_path, metadata = await download_instagram_video(url)
-            else:
-                media_path, metadata = await download_video(url)
-            duration = metadata.get("duration", 0) or 0
-            if duration <= _SHORT_FORM_MAX_DURATION:
-                frames = extract_frames(media_path, duration)
-                used_vision = bool(frames)
-            await on_step("Transcribing...")
+            transcript = None
+            metadata = {}
+
+            # Try video download first (enables frame extraction for visual context)
             try:
-                transcript = await transcribe_audio(media_path, openai_client)
-            except Exception as whisper_err:
-                # Video file has no audio track or unsupported format — retry audio-only
-                print(f"[tldr] video transcribe failed ({whisper_err}), retrying audio-only")
-                await on_step("Retrying with audio download...")
+                if platform == "Instagram":
+                    media_path, metadata = await download_instagram_video(url)
+                else:
+                    media_path, metadata = await download_video(url)
+            except ValueError as dl_err:
+                print(f"[tldr] video download failed ({dl_err}), falling back to audio-only")
+                media_path = None
+
+            if media_path:
+                duration = metadata.get("duration", 0) or 0
+                video_size = os.path.getsize(media_path)
+                # Extract frames regardless of file size — they're sent to vision, not Whisper
+                if duration <= _SHORT_FORM_MAX_DURATION:
+                    frames = extract_frames(media_path, duration)
+                    used_vision = bool(frames)
+                # Only send to Whisper if within the 25 MB API limit
+                if video_size <= _WHISPER_SIZE_LIMIT:
+                    await on_step("Transcribing...")
+                    try:
+                        transcript = await transcribe_audio(media_path, openai_client)
+                    except Exception as whisper_err:
+                        print(f"[tldr] video transcription failed ({whisper_err}), falling back to audio-only")
+                        transcript = None
+                else:
+                    print(f"[tldr] video file {video_size // (1024 * 1024)} MB exceeds Whisper limit, falling back to audio-only")
+
+            if not transcript:
                 audio_path = None
                 try:
-                    audio_path, _ = await download_audio(url)
+                    if media_path:
+                        # Video already on disk — demux the audio track in-process.
+                        # PyAV copies the AAC stream without re-encoding: ~2 MB from a 27 MB mp4.
+                        await on_step("Extracting audio track...")
+                        try:
+                            audio_path = await extract_audio_track(media_path)
+                        except Exception as extraction_err:
+                            print(f"[tldr] audio extraction failed ({extraction_err}), downloading instead")
+                            audio_path = None
+
+                    if audio_path is None:
+                        step_msg = "Downloading audio..." if not media_path else "Retrying with audio download..."
+                        await on_step(step_msg)
+                        audio_path, audio_meta = await download_audio(url)
+                        if not metadata:
+                            metadata = audio_meta
+
+                    await on_step("Transcribing...")
                     transcript = await transcribe_audio(audio_path, openai_client)
                 except Exception as e:
                     raise ValueError(f"Could not transcribe video: {e}") from None
