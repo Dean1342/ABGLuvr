@@ -13,7 +13,7 @@ from openai import AsyncOpenAI
 
 from utils.integrations import supabase_client as db
 from utils.ui.build_pagination import BuildPaginationView
-from utils.build import charts
+from utils.car_charts import charts
 
 
 # ── Module-level helpers ────────────────────────────────────────────────────
