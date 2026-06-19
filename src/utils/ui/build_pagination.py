@@ -8,7 +8,6 @@ STATUS_EMOJI = {
     'in_progress': '🔧',
 }
 MODS_PER_PAGE = 12
-INSTALLED_STATUSES = {'installed', 'ordered'}
 
 
 def _effective_cost(m: dict) -> float:
@@ -40,8 +39,9 @@ class BuildPaginationView(discord.ui.View):
         self.chart_timeline = chart_timeline
         self.chart_categories = chart_categories
 
-        self.installed_mods = [m for m in mods if m.get('status') in INSTALLED_STATUSES]
-        self.planned_mods = [m for m in mods if m.get('status') not in INSTALLED_STATUSES]
+        self.installed_mods = [m for m in mods if m.get('status') == 'installed']
+        self.ordered_mods   = [m for m in mods if m.get('status') == 'ordered']
+        self.planned_mods   = [m for m in mods if m.get('status') not in ('installed', 'ordered')]
 
         self.pages = self._build_page_list()
         self.current_idx = 0
@@ -53,6 +53,10 @@ class BuildPaginationView(discord.ui.View):
             n = -(-len(self.installed_mods) // MODS_PER_PAGE)
             for i in range(n):
                 pages.append(f'installed_{i}')
+        if self.ordered_mods:
+            n = -(-len(self.ordered_mods) // MODS_PER_PAGE)
+            for i in range(n):
+                pages.append(f'ordered_{i}')
         if self.planned_mods:
             n = -(-len(self.planned_mods) // MODS_PER_PAGE)
             for i in range(n):
@@ -79,12 +83,19 @@ class BuildPaginationView(discord.ui.View):
 
         # Row 1: section jump buttons
         inst_idx = next((i for i, p in enumerate(self.pages) if p.startswith('installed_')), None)
+        ord_idx  = next((i for i, p in enumerate(self.pages) if p.startswith('ordered_')), None)
         plan_idx = next((i for i, p in enumerate(self.pages) if p.startswith('planned_')), None)
         if inst_idx is not None:
             self.add_item(JumpButton(
                 self, inst_idx,
                 f'✅ Installed ({len(self.installed_mods)})',
                 discord.ButtonStyle.success, row=1,
+            ))
+        if ord_idx is not None:
+            self.add_item(JumpButton(
+                self, ord_idx,
+                f'📦 Ordered ({len(self.ordered_mods)})',
+                discord.ButtonStyle.primary, row=1,
             ))
         if plan_idx is not None:
             self.add_item(JumpButton(
@@ -119,7 +130,8 @@ class BuildPaginationView(discord.ui.View):
 
     def _make_profile_embed(self) -> discord.Embed:
         p = self.profile
-        current_cost = sum(_effective_cost(m) for m in self.installed_mods)
+        purchased = self.installed_mods + self.ordered_mods
+        current_cost = sum(_effective_cost(m) for m in purchased)
         planned_cost = sum(_effective_cost(m) for m in self.planned_mods)
         projected = current_cost + planned_cost
         labor_cost = sum(float(l.get('cost') or 0) for l in self.labor)
@@ -146,7 +158,10 @@ class BuildPaginationView(discord.ui.View):
         p = self.profile
         if section == 'installed':
             mods_list = self.installed_mods
-            section_label = '✅ Purchased & Installed'
+            section_label = '✅ Installed'
+        elif section == 'ordered':
+            mods_list = self.ordered_mods
+            section_label = '📦 Ordered'
         else:
             mods_list = self.planned_mods
             section_label = '📋 Planned'
@@ -189,6 +204,9 @@ class BuildPaginationView(discord.ui.View):
         if page.startswith('installed_'):
             n = int(page.split('_')[1])
             return self._make_section_embed('installed', n), None
+        if page.startswith('ordered_'):
+            n = int(page.split('_')[1])
+            return self._make_section_embed('ordered', n), None
         if page.startswith('planned_'):
             n = int(page.split('_')[1])
             return self._make_section_embed('planned', n), None

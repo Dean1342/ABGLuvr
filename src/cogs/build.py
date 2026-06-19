@@ -203,6 +203,57 @@ async def _gpt_normalize_xlsx(raw_text: str) -> list[dict]:
 
 # ── Modals ──────────────────────────────────────────────────────────────────
 
+class AddModModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title='Add a Mod')
+        self.name_field = discord.ui.TextInput(
+            label='Name', placeholder='e.g. Coilover Kit', max_length=100
+        )
+        self.category_field = discord.ui.TextInput(
+            label='Category',
+            placeholder='Exterior / Performance / Interior / Audio / Misc…',
+            max_length=50,
+        )
+        self.cost_field = discord.ui.TextInput(
+            label='Listed Cost ($)',
+            placeholder='e.g. 2500  (listed or projected price)',
+            max_length=20,
+        )
+        self.paid_field = discord.ui.TextInput(
+            label='Amount Paid ($)',
+            placeholder='0 if not yet purchased',
+            max_length=20,
+        )
+        self.status_field = discord.ui.TextInput(
+            label='Status',
+            placeholder='installed / ordered / planned / in_progress',
+            max_length=20,
+        )
+        for f in (self.name_field, self.category_field, self.cost_field, self.paid_field, self.status_field):
+            self.add_item(f)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        profile = await db.get_profile(interaction.user.id)
+        if not profile:
+            await interaction.followup.send(
+                "Set up your car first with `/build setcar`.", ephemeral=True
+            )
+            return
+        mod_data = {
+            'name': self.name_field.value.strip()[:100],
+            'category': self.category_field.value.strip()[:50] or 'Misc',
+            'cost': _strip_currency(self.cost_field.value),
+            'paid': _strip_currency(self.paid_field.value),
+            'status': _normalize_status(self.status_field.value),
+        }
+        await db.upsert_mod(interaction.user.id, mod_data)
+        await interaction.followup.send(
+            f"{interaction.user.mention} added **{mod_data['name']}** `[{mod_data['category']}]` — "
+            f"${mod_data['cost']:,.2f} listed, ${mod_data['paid']:,.2f} paid  ({mod_data['status']})"
+        )
+
+
 class EditModModal(discord.ui.Modal):
     name_field = discord.ui.TextInput(label='Name', max_length=100)
     category_field = discord.ui.TextInput(label='Category', max_length=50, required=False)
@@ -497,7 +548,7 @@ def _make_overview_embed() -> discord.Embed:
     emb.add_field(
         name='🔧  Mod Tracking',
         value=(
-            '`/build add` — Add a part to your build\n'
+            '`/build add` — Add a part *(opens a form)*\n'
             '`/build remove` — Remove a part *(with confirmation)*\n'
             '`/build edit` — Edit a part via a pre-filled form'
         ),
@@ -583,12 +634,10 @@ def _make_command_embed(key: str) -> discord.Embed:
             'Set via URL or file upload. The main image also auto-detects your car\'s color for the embed theme.'
         )
         e.add_field(
-            name='Setting photos (all optional — provide any combination)',
+            name='Setting photos',
             value=(
-                '`main` — URL for the large embed image\n'
-                '`thumb` — URL for the small top-right thumbnail\n'
-                '`mainfile` — Upload the main image from your device\n'
-                '`thumbfile` — Upload the thumbnail from your device'
+                '`mainfile` — Attach the main (large) image\n'
+                '`thumbfile` — Attach the thumbnail (top-right)'
             ),
             inline=False,
         )
@@ -604,17 +653,16 @@ def _make_command_embed(key: str) -> discord.Embed:
         e.add_field(
             name='Usage',
             value=(
-                '`/build setimage main:https://i.imgur.com/abc.jpg`\n'
-                '`/build setimage mainfile:[attach photo]`  *(upload from device)*\n'
-                '`/build setimage remove:All photos`  *(remove everything)*'
+                '`/build setimage mainfile:[attach photo]`\n'
+                '`/build setimage thumbfile:[attach photo]`\n'
+                '`/build setimage remove:All photos`'
             ),
             inline=False,
         )
         e.add_field(
             name='Notes',
             value=(
-                '• File uploads take priority over URLs if both are provided for the same slot\n'
-                '• Setting a main image automatically detects your car\'s paint color and applies it as the embed theme\n'
+                '• Setting a main image automatically detects your car\'s paint color as the embed theme\n'
                 '• Override the auto-detected color any time with `/build setbio customcolor:#RRGGBB`'
             ),
             inline=False,
@@ -623,31 +671,33 @@ def _make_command_embed(key: str) -> discord.Embed:
     elif key == 'add':
         e.title = '/build add — Add a Mod'
         e.description = (
-            'Add a part or modification to your build tracker. '
-            'Running this with the same mod name updates the existing entry instead of duplicating it.'
+            'Opens a form to add a part to your build tracker. '
+            'Submitting with the same mod name updates the existing entry instead of duplicating it.'
         )
         e.add_field(
-            name='Required',
+            name='Form Fields (all required)',
             value=(
-                '`name` — Part name *(e.g. "Coilover Kit")*\n'
-                '`category` — e.g. Exterior / Performance / Interior / Wheels & Tires / Audio\n'
-                '`cost` — Listed or total price *(e.g. 2500 or $2,500)*\n'
-                '`paid` — Amount you\'ve actually paid so far'
+                '**Name** — Part name *(e.g. "Coilover Kit")*\n'
+                '**Category** — e.g. Exterior / Performance / Interior / Wheels & Tires / Audio\n'
+                '**Listed Cost ($)** — Listed or projected price *(e.g. 2500)*\n'
+                '**Amount Paid ($)** — Amount you\'ve actually paid *(0 if not yet purchased)*\n'
+                '**Status** — `installed` / `ordered` / `planned` / `in_progress`'
             ),
             inline=False,
         )
         e.add_field(
-            name='Optional',
+            name='Status Guide',
             value=(
-                '`link` — Product page or receipt URL\n'
-                '`status` — `planned` / `ordered` / `installed` / `in_progress`  ·  default: planned\n'
-                '`date` — Install date in `YYYY-MM-DD` format'
+                '`installed` — On the car\n'
+                '`ordered` — Purchased, waiting to arrive/install\n'
+                '`planned` — Not yet bought\n'
+                '`in_progress` — Currently being installed'
             ),
             inline=False,
         )
         e.add_field(
-            name='Usage',
-            value='`/build add "Whiteline Sway Bar" Suspension 280 280 installed 2024-03-10`',
+            name='Notes',
+            value='To add a product link or install date, use `/build edit` after adding the mod.',
             inline=False,
         )
 
@@ -949,10 +999,8 @@ class Build(commands.GroupCog, name="build"):
 
     @app_commands.command(name="setimage", description="Set or remove your car photos.")
     @app_commands.describe(
-        main="URL for the large embed image",
-        thumb="URL for the small top-right thumbnail",
-        mainfile="Upload the main image from your device",
-        thumbfile="Upload the thumbnail from your device",
+        mainfile="Upload the main (large) image",
+        thumbfile="Upload the thumbnail (top-right small image)",
         remove="Remove photo(s) from your profile",
     )
     @app_commands.choices(remove=[
@@ -962,8 +1010,6 @@ class Build(commands.GroupCog, name="build"):
     ])
     async def setimage(
         self, interaction: discord.Interaction,
-        main: Optional[str] = None,
-        thumb: Optional[str] = None,
         mainfile: Optional[discord.Attachment] = None,
         thumbfile: Optional[discord.Attachment] = None,
         remove: Optional[str] = None,
@@ -986,27 +1032,25 @@ class Build(commands.GroupCog, name="build"):
         updates: dict = {}
         labels: list[str] = []
 
-        main_final = mainfile.url if mainfile else main
-        if main_final:
-            updates['car_image_url'] = main_final
+        if mainfile:
+            updates['car_image_url'] = mainfile.url
             labels.append('main image')
 
-        thumb_final = thumbfile.url if thumbfile else thumb
-        if thumb_final:
-            updates['thumbnail_url'] = thumb_final
+        if thumbfile:
+            updates['thumbnail_url'] = thumbfile.url
             labels.append('thumbnail')
 
         if not updates:
             await interaction.followup.send(
-                "Provide at least one image (URL or file), or use `remove` to clear photos.",
+                "Attach at least one image, or use `remove` to clear photos.",
                 ephemeral=True,
             )
             return
 
         await db.upsert_profile(interaction.user.id, interaction.guild_id or 0, updates)
 
-        if main_final:
-            detected = await _detect_car_color(main_final)
+        if mainfile:
+            detected = await _detect_car_color(mainfile.url)
             if detected is not None:
                 await db.upsert_profile(
                     interaction.user.id, interaction.guild_id or 0, {'embed_color': detected}
@@ -1019,49 +1063,8 @@ class Build(commands.GroupCog, name="build"):
     # ── Mod commands ──────────────────────────────────────────────────────
 
     @app_commands.command(name="add", description="Add a mod to your build.")
-    @app_commands.describe(
-        name="Part/mod name",
-        category="Category (Exterior, Performance, Interior, Wheels & Tires, Audio, etc.)",
-        cost="Listed price (e.g. 1200 or $1,200.00)",
-        paid="Amount you've paid so far",
-        link="Product page or receipt URL (optional)",
-        status="Current status",
-        date="Install date YYYY-MM-DD (optional)",
-    )
-    @app_commands.choices(status=[
-        app_commands.Choice(name='Planned', value='planned'),
-        app_commands.Choice(name='Ordered', value='ordered'),
-        app_commands.Choice(name='Installed', value='installed'),
-        app_commands.Choice(name='In Progress', value='in_progress'),
-    ])
-    async def add(
-        self, interaction: discord.Interaction,
-        name: str,
-        category: str,
-        cost: str,
-        paid: str,
-        link: Optional[str] = None,
-        status: str = 'planned',
-        date: Optional[str] = None,
-    ):
-        await interaction.response.defer()
-        profile = await _require_profile(interaction, interaction.user.id)
-        if not profile:
-            return
-        mod_data = {
-            'name': name[:100],
-            'category': category[:50],
-            'cost': _strip_currency(cost),
-            'paid': _strip_currency(paid),
-            'status': _normalize_status(status),
-            'link': link or None,
-            'install_date': date or None,
-        }
-        await db.upsert_mod(interaction.user.id, mod_data)
-        await interaction.followup.send(
-            f"{interaction.user.mention} added **{name}** `[{category}]` — "
-            f"${mod_data['cost']:,.2f} listed, ${mod_data['paid']:,.2f} paid  ({mod_data['status']})"
-        )
+    async def add(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddModModal())
 
     @app_commands.command(name="remove", description="Remove a mod from your build, or remove all mods.")
     @app_commands.describe(
