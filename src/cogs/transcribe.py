@@ -17,6 +17,10 @@ _SHORT_FORM_PLATFORMS = {"TikTok", "Instagram", "Twitter/X"}
 _SHORT_FORM_MAX_DURATION = 180  # seconds
 _WHISPER_SIZE_LIMIT = 25 * 1024 * 1024  # 25 MB — Whisper API hard limit
 
+# Containers Whisper accepts directly. Anything else (.mov, .mkv, .avi, raw .aac, .wma…)
+# must have its audio track extracted/transcoded to AAC/mp4 first via PyAV.
+_WHISPER_SUPPORTED_EXTS = {"flac", "m4a", "mp3", "mp4", "mpeg", "mpga", "oga", "ogg", "wav", "webm"}
+
 # TLDR result cache keyed by Discord message ID — used for video conversation context
 tldr_results: dict[int, dict] = {}
 _TLDR_MAX_CACHE = 100
@@ -228,16 +232,26 @@ async def _run_tldr_attachment(
     TLDR pipeline for Discord-uploaded video/audio files.
     Returns (embed, files, transcript, metadata, summary).
     """
-    if attachment.size > 25 * 1024 * 1024:
-        raise ValueError(f"File too large — max 25 MB (this file is {attachment.size // (1024 * 1024)} MB).")
     ct = (attachment.content_type or "").lower()
     is_video = ct.startswith("video/")
     is_audio = ct.startswith("audio/")
     if not (is_video or is_audio):
         raise ValueError("Attachment must be a video or audio file.")
 
+    # Video files get their audio stripped to a tiny track before Whisper, so we can
+    # accept larger uploads. Audio goes to Whisper (after optional transcode) — cap near its limit.
+    max_size = 100 * 1024 * 1024 if is_video else 25 * 1024 * 1024
+    if attachment.size > max_size:
+        raise ValueError(
+            f"File too large — max {max_size // (1024 * 1024)} MB "
+            f"(this file is {attachment.size // (1024 * 1024)} MB)."
+        )
+
+    ext = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else ""
+
     await on_step("Downloading attachment...")
     path = None
+    audio_path = None
     try:
         path = await download_attachment(attachment.url, attachment.filename)
         metadata: dict = {
@@ -263,8 +277,25 @@ async def _run_tldr_attachment(
             except ImportError:
                 pass
 
+        # Convert to a Whisper-supported format when needed. Video is always stripped to
+        # its audio track (handles .mov/.mkv/.avi and shrinks the upload); audio is only
+        # transcoded when its container isn't one Whisper accepts.
+        transcribe_target = path
+        if is_video or (is_audio and ext not in _WHISPER_SUPPORTED_EXTS):
+            await on_step("Extracting audio track...")
+            try:
+                audio_path = await extract_audio_track(path)
+                transcribe_target = audio_path
+            except Exception as extraction_err:
+                print(f"[tldr attachment] audio extraction failed ({extraction_err})")
+                if ext not in _WHISPER_SUPPORTED_EXTS:
+                    raise ValueError(
+                        f"Couldn't process this .{ext or 'file'} — its audio track could not be extracted."
+                    ) from None
+                transcribe_target = path  # supported container: send it as-is
+
         await on_step("Transcribing...")
-        transcript = await transcribe_audio(path, openai_client)
+        transcript = await transcribe_audio(transcribe_target, openai_client)
         if not transcript:
             raise ValueError("No speech detected in this file.")
 
@@ -284,6 +315,8 @@ async def _run_tldr_attachment(
     finally:
         if path and os.path.exists(path):
             os.remove(path)
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
 
 
 class Transcribe(commands.Cog):

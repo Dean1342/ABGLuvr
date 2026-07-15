@@ -19,7 +19,8 @@
       "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe\" -c \"import av; print\\('av', av.__version__\\)\")",
       "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/pip.exe\" --version)",
       "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe\" -c \"import site; print\\(site.getsitepackages\\(\\)\\)\")",
-      "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe\" -m pip install av)"
+      "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe\" -m pip install av)",
+      "Bash('D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe' -c ' *)"
     ]
   }
 }
