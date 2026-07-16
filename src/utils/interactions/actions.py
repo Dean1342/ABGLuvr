@@ -75,6 +75,9 @@ def get_interaction_function_schemas():
                             "(e.g. '<@123456789>'). If the user names the target WITHOUT tagging them "
                             "(e.g. 'ping bob' — often deliberate so bob isn't notified early), pass that "
                             "name/nickname string as-is; the bot resolves it against server members. "
+                            "If the user refers to THEMSELVES (e.g. 'ping me', 'remind me'), pass the "
+                            "literal string 'me'. The assistant's OWN mention that triggered this command "
+                            "(the bot being @-tagged to invoke it) is NEVER the target — ignore it. "
                             "Never a role, @everyone, or @here."
                         ),
                     },
@@ -120,7 +123,10 @@ def get_interaction_function_schemas():
                             "(e.g. '<@123456789>'). If the user names the target WITHOUT tagging them "
                             "(e.g. 'remind bob in 2h' — often deliberate so bob isn't notified early), "
                             "pass that name/nickname string as-is; the bot resolves it against server "
-                            "members. Never a role, @everyone, or @here."
+                            "members. If the user refers to THEMSELVES (e.g. 'remind me'), pass the "
+                            "literal string 'me'. The assistant's OWN mention that triggered this command "
+                            "(the bot being @-tagged to invoke it) is NEVER the target — ignore it. "
+                            "Never a role, @everyone, or @here."
                         ),
                     },
                     "delay_seconds": {
@@ -261,8 +267,10 @@ def build_delivery_instruction(pending):
         f"them: \"{note}\".\n"
         f"Write the EXACT message you'll send to that user right now, IN YOUR OWN CHARACTER/PERSONA "
         f"voice, speaking directly TO them in second person (as if you're the one saying it, not "
-        f"relaying someone else's words). Turn third-person phrasing into direct address — e.g. "
-        f"'tell him to go fuck himself' becomes something like 'go fuck yourself'.\n"
+        f"relaying someone else's words). Rewrite ALL first- and third-person references so it "
+        f"addresses the recipient directly — e.g. 'tell him to go fuck himself' -> 'go fuck yourself', "
+        f"'sniff my ass' -> 'go sniff your ass', 'remind me to eat' -> 'go eat'. If it's a reminder, "
+        f"phrase it as a nudge to them (e.g. 'yo, reminder to go eat').\n"
         f"Exception: if the requester clearly asked you to send an exact, word-for-word, or quoted "
         f"phrase, output that phrase verbatim instead.\n"
         f"Rules: Output a SINGLE short one-line message only — do NOT repeat it or write multiple "
@@ -287,6 +295,32 @@ def _reject_target(raw_target):
     if _ROLE_MENTION_RE.search(raw_target):
         return True
     return False
+
+
+# Words that mean "the person who sent the request" rather than a named user.
+_SELF_REFS = {"me", "myself", "self", "i", "my", "mine"}
+
+
+def _resolve_target_id(raw_target, guild, requester_id, bot_user_id):
+    """Resolve the ping target to a user id, returning None if it can't/shouldn't be.
+
+    Handles self-reference ('remind me' -> the requester) and refuses to target the
+    bot itself (the model sometimes grabs the bot's own invoking @-mention as target).
+    """
+    from utils.ai.message_processing import resolve_discord_user_id  # lazy: break import cycle
+
+    normalized = (raw_target or "").strip().lstrip("@").lower()
+    if normalized in _SELF_REFS:
+        return requester_id
+
+    target_id = resolve_discord_user_id(raw_target, guild)
+    if target_id is None:
+        return None
+    if bot_user_id is not None and target_id == bot_user_id:
+        # The bot's trigger mention isn't a valid target; assume the requester meant
+        # themselves if there's nothing else to go on.
+        return None
+    return target_id
 
 
 async def await_confirmation(bot, ack_message, requester_id, timeout=CONFIRM_TIMEOUT):
@@ -315,18 +349,17 @@ async def await_confirmation(bot, ack_message, requester_id, timeout=CONFIRM_TIM
         return False
 
 
-async def execute_spam_ping(message, guild, pending):
+async def execute_spam_ping(bot, message, guild, pending):
     """Resolve the target and send `count` separate ping messages, spaced out."""
-    from utils.ai.message_processing import resolve_discord_user_id  # lazy: break import cycle
-
     raw_target = pending["target"]
     if _reject_target(raw_target):
         await message.reply("nah i'm not mass-pinging a whole role/@everyone 💀")
         return
 
-    target_id = resolve_discord_user_id(raw_target, guild)
+    bot_user_id = bot.user.id if bot.user else None
+    target_id = _resolve_target_id(raw_target, guild, message.author.id, bot_user_id)
     if target_id is None:
-        await message.reply("couldn't figure out who you meant — tag them directly?")
+        await message.reply("couldn't figure out who you meant — tag them or use their name?")
         return
 
     text = _delivery_text(pending)
@@ -395,16 +428,15 @@ def _arm_reminder(bot, reminder_id, channel_id, target_id, text, delay):
 async def execute_scheduled_message(bot, channel, guild, pending, requester_id, ack_message):
     """Resolve the target now (fail fast), persist the reminder so it survives a
     restart, then arm the in-memory timer."""
-    from utils.ai.message_processing import resolve_discord_user_id  # lazy: break import cycle
-
     raw_target = pending["target"]
     if _reject_target(raw_target):
         await ack_message.reply("can't schedule a ping to a role/@everyone, sorry 🙅")
         return
 
-    target_id = resolve_discord_user_id(raw_target, guild)
+    bot_user_id = bot.user.id if bot.user else None
+    target_id = _resolve_target_id(raw_target, guild, requester_id, bot_user_id)
     if target_id is None:
-        await ack_message.reply("couldn't figure out who you meant — tag them directly?")
+        await ack_message.reply("couldn't figure out who you meant — tag them or use their name?")
         return
 
     delay = pending["delay_seconds"]
@@ -479,6 +511,6 @@ async def handle_pending_action(bot, message, ack_message, pending):
             return
 
     if pending["type"] == "spam_ping":
-        await execute_spam_ping(message, guild, pending)
+        await execute_spam_ping(bot, message, guild, pending)
     elif pending["type"] == "schedule_message":
         await execute_scheduled_message(bot, channel, guild, pending, requester_id, ack_message)

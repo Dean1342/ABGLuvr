@@ -23,7 +23,8 @@
       "Bash('D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe' -c ' *)",
       "Bash(python -m py_compile src/utils/ai/message_processing.py)",
       "Bash(python -m py_compile src/utils/interactions/actions.py src/utils/ai/message_processing.py src/bot.py)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python -m py_compile src/utils/interactions/actions.py src/utils/ai/message_processing.py src/bot.py src/utils/integrations/supabase_client.py)"
     ]
   }
 }
