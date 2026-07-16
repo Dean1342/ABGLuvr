@@ -13,6 +13,10 @@ from utils.integrations.websearch import web_search_and_summarize
 from utils.integrations.currency import convert_currency
 from utils.core.text_formatting import format_discord_links
 from utils.conversation.persona_loaders import load_jagbir_persona, load_lemon_persona, load_epoe_persona
+from utils.interactions.actions import (
+    get_interaction_function_schemas, build_pending_action, build_ack_instruction,
+    build_delivery_instruction
+)
 
 
 def resolve_discord_user_id(user_str, guild):
@@ -142,40 +146,73 @@ def get_function_schemas():
         {
             "name": "web_search",
             "description": (
-                f"Performs a web search for the given query and returns relevant results. "
-                f"Use this function if the user's question is about current events, recent news, or anything that may have changed since your knowledge cutoff. "
-                f"Today's date is {current_date}."
+                f"Searches the web and returns up-to-date information from real sources. "
+                f"Today's date is {current_date}. Your internal knowledge has a training cutoff and may be stale, incomplete, or wrong for anything specific.\n\n"
+                f"CALL this whenever giving an accurate answer depends on information you cannot reliably recall from memory, including:\n"
+                f"- Current events, news, recent releases, or anything time-sensitive (prices, scores, weather, schedules, 'latest'/'newest' anything).\n"
+                f"- Specific facts about real people, companies, products, software versions, specs, or events — especially niche or recent ones.\n"
+                f"- Any question where being out of date or slightly wrong would matter to the user (statistics, dates, records, 'who/what/when/where is...', 'how much does X cost', 'is X still...').\n"
+                f"- Things that plausibly changed after your training cutoff, or that you are not confident you know precisely.\n\n"
+                f"Prefer searching over guessing when the user clearly wants a factual, correct answer. It is better to search than to hallucinate a confident-but-wrong answer.\n\n"
+                f"Do NOT call this for:\n"
+                f"- Casual conversation, opinions, jokes, roleplay, or staying in character.\n"
+                f"- Creative writing, brainstorming, summarizing, or transforming text the user already provided.\n"
+                f"- Math, logic, coding, or reasoning you can do yourself.\n"
+                f"- Timeless general knowledge you are confident about (basic definitions, common facts, well-established concepts).\n"
+                f"- Information already present earlier in this conversation.\n"
+                f"When unsure whether a factual question needs current data, lean toward searching; when the message is clearly casual or self-contained, don't."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The search query"}
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "A concise, keyword-focused search query capturing exactly what needs to be looked up. "
+                            "Resolve references from the conversation into a standalone query (e.g. replace 'he'/'that game'/'there' with the actual name). "
+                            "Do not include conversational filler; write it the way you'd type it into a search engine."
+                        )
+                    }
                 },
                 "required": ["query"]
             }
         },
         {
             "name": "convert_currency",
-            "description": "Converts an amount from one currency to another using current exchange rates.",
+            "description": (
+                "Converts a specific amount of money from one currency into another using the live exchange rate. "
+                "ONLY call this when the user is explicitly and unambiguously asking to convert a value between currencies "
+                "and clearly wants the equivalent amount in the target currency. "
+                "Trigger examples: 'convert 50 USD to EUR', 'how much is 100 euros in dollars', "
+                "'what's 20 GBP in yen', 'what would 5.69 dollars be in euros'.\n\n"
+                "Do NOT call this function in these cases:\n"
+                "- The user is comparing prices or values that are already stated in different currencies (e.g. '$5.69/gallon vs 2.20 euro/liter') — "
+                "just discuss/reason about the comparison in text; do not silently convert.\n"
+                "- Currencies or amounts are merely mentioned in passing, as context, or as part of a broader discussion.\n"
+                "- The user is asking about exchange rate trends, economics, or opinions rather than a concrete conversion.\n"
+                "- The target currency is ambiguous or not specified. When in doubt, answer in text and ask what they want converted "
+                "instead of calling this function."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "amount": {
-                        "type": "number", 
+                        "type": "number",
                         "description": "The amount to convert"
                     },
                     "from_currency": {
-                        "type": "string", 
+                        "type": "string",
                         "description": "The source currency code (e.g., USD, EUR, GBP)"
                     },
                     "to_currency": {
-                        "type": "string", 
-                        "description": "The target currency code (e.g., USD, EUR, GBP)"
+                        "type": "string",
+                        "description": "The explicit target currency code the user asked to convert into (e.g., USD, EUR, GBP). Only set this when the user clearly named or implied a specific target currency."
                     }
                 },
                 "required": ["amount", "from_currency", "to_currency"]
             }
-        }
+        },
+        *get_interaction_function_schemas()
     ]
 
 
@@ -193,47 +230,38 @@ async def handle_openai_response(client, messages, function_schemas, model, open
                 function_call="auto"
             )
             choice = response.choices[0]
+            pending_action = None  # discord-side action returned up to on_message
 
             # Handle function calls if requested
             if choice.finish_reason == "function_call":
                 func_name = choice.message.function_call.name
                 func_args = choice.message.function_call.arguments
                 args = json.loads(func_args)
-                
+
                 if func_name == "web_search":
                     try:
                         web_context = await web_search_and_summarize(args["query"], openai_api_key)
-                        
-                        # Find the original user message that triggered the search
-                        original_user_message = next((msg for msg in reversed(messages) if msg["role"] == "user"), None)
-                        original_content = ""
-                        if original_user_message:
-                            if isinstance(original_user_message["content"], list):
-                                text_parts = [part["text"] for part in original_user_message["content"] if part.get("type") == "text"]
-                                original_content = " ".join(text_parts)
-                            else:
-                                original_content = original_user_message["content"]
 
-                        # Create a new, explicit prompt to guide the model
-                        new_prompt = (
-                            f"The user asked: \"{original_content}\"\n\n"
-                            f"I found some information about this. Here are the web search results:\n"
+                        # Inject the search results as context while preserving the full
+                        # conversation history, so follow-ups and references stay coherent.
+                        search_context = (
+                            f"[WEB SEARCH RESULTS for the user's latest message]\n"
                             f"{web_context}\n\n"
-                            f"Now respond to the user's question naturally and conversationally, incorporating this information into your response while staying completely in character. "
-                            f"Don't announce that you searched for information - just naturally weave the facts into your response as if you already knew them. "
-                            f"Keep your personality and speaking style consistent with your character. Make it feel like a natural conversation, not a formal report."
+                            f"Use the information above to answer the user's most recent message accurately. "
+                            f"Only use what's relevant; ignore results that don't help. If the results don't actually "
+                            f"answer the question, say so honestly instead of making something up. "
+                            f"Don't announce that you searched — just weave the facts in naturally as if you already knew them, "
+                            f"staying completely in character and consistent with your personality and speaking style. "
+                            f"Respond conversationally, not as a formal report."
                         )
 
-                        # Create a new, clean message list for the final response
-                        # This isolates the final generation from the messy function-call history
-                        final_messages = [
-                            messages[0],  # Keep the original system prompt
-                            {"role": "user", "content": new_prompt}
-                        ]
-                        
+                        # Preserve the original conversation and append the search context as a
+                        # system message right before generating the final response.
+                        final_messages = messages + [{"role": "system", "content": search_context}]
+
                         response2 = await client.chat.completions.create(
                             model=model,
-                            messages=final_messages  # Use the new, clean message list
+                            messages=final_messages
                         )
                         answer = response2.choices[0].message.content
                         
@@ -282,37 +310,77 @@ async def handle_openai_response(client, messages, function_schemas, model, open
                     except Exception as e:
                         print(f"Error in currency conversion: {e}")
                         answer = "❌ Currency conversion failed due to an unexpected error. Please try again."
-                
+
+                elif func_name in ("spam_ping", "schedule_message"):
+                    # These require Discord context (guild/channel/reactions) that doesn't
+                    # exist here, so we don't execute — we build a normalized pending action
+                    # and return it up to on_message. The ack itself is generated in the
+                    # persona's voice via a second, function-free completion.
+                    try:
+                        pending_action = build_pending_action(func_name, args)
+
+                        # Craft the ACTUAL message sent to the target in the bot's own
+                        # persona voice (second person), unless the user wanted a verbatim
+                        # phrase. Done now (client available) so scheduled sends stay LLM-free.
+                        delivery_messages = messages + [
+                            {"role": "system", "content": build_delivery_instruction(pending_action)}
+                        ]
+                        delivery_resp = await client.chat.completions.create(
+                            model=model,
+                            messages=delivery_messages
+                        )
+                        crafted = (delivery_resp.choices[0].message.content or "").strip().strip('"').strip()
+                        if crafted:
+                            pending_action["delivery_text"] = crafted
+
+                        # Persona-voiced acknowledgement to the requester.
+                        instruction = build_ack_instruction(pending_action)
+                        final_messages = messages + [{"role": "system", "content": instruction}]
+                        response2 = await client.chat.completions.create(
+                            model=model,
+                            messages=final_messages
+                        )
+                        answer = response2.choices[0].message.content
+                    except Exception as e:
+                        print(f"Error building interactive action: {e}")
+                        pending_action = None
+                        answer = "hmm, i couldn't set that up right now — try again?"
+
                 else:
                     answer = f"Function {func_name} not implemented."
-            
+
             # Handle regular text response
             else:
                 answer = choice.message.content
-            
-            return choice, answer  # Success, return the final answer
+
+            return choice, answer, pending_action  # Success, return the final answer
 
         except Exception as e:
             print(f"OpenAI API Error (attempt {attempt + 1}/{max_retries}): {e}")
             if attempt + 1 >= max_retries:
                 # All retries failed, return an error message to the user
-                return None, "⚠️ Sorry, I'm having trouble connecting to the AI service after multiple attempts. Please try again later."
+                return None, "⚠️ Sorry, I'm having trouble connecting to the AI service after multiple attempts. Please try again later.", None
             await asyncio.sleep(1.5)  # Wait before retrying
-    
+
     # Fallback in case the loop finishes unexpectedly
-    return None, "⚠️ An unexpected error occurred while processing your request."
+    return None, "⚠️ An unexpected error occurred while processing your request.", None
 
 
 async def send_response(message, answer):
-    # Send a response to Discord
+    # Send a response to Discord. Returns the primary sent message so callers can
+    # act on it (e.g. attach a confirmation reaction for interactive actions).
     answer = format_discord_links(answer)
     max_len = 2000
-    
+
     if len(answer) <= max_len:
-        await message.reply(answer)
+        return await message.reply(answer)
     else:
+        first = None
         for i in range(0, len(answer), max_len):
-            await message.channel.send(answer[i:i+max_len])
+            sent = await message.channel.send(answer[i:i+max_len])
+            if first is None:
+                first = sent
+        return first
 
 
 async def update_conversation_history(conversation, user_message_content, answer, user_id, display_name, username, active_conv_key, openai_api_key):

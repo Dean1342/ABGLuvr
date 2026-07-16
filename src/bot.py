@@ -27,6 +27,7 @@ from utils.ai.message_processing import (
     build_user_message_content, get_function_schemas, handle_openai_response,
     send_response, update_conversation_history
 )
+from utils.interactions.actions import handle_pending_action
 
 # Main bot entry point and event handlers
 
@@ -35,6 +36,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.members = True
+intents.reactions = True  # needed for the ✅ confirmation gate on interactive actions
 
 # Main bot class
 class MyBot(commands.Bot):
@@ -300,14 +302,19 @@ async def on_message(message: discord.Message):
     # Call OpenAI and send response
     async with message.channel.typing():
         function_schemas = get_function_schemas()
-        choice, answer = await handle_openai_response(client, messages, function_schemas, model, openai_api_key)
-        
+        choice, answer, pending_action = await handle_openai_response(client, messages, function_schemas, model, openai_api_key)
+
         if choice is None:
             await message.reply(answer)
             return
 
-    await send_response(message, answer)
-    
+    # Capture the sent ack so an interactive action can react to it. Confirmation/
+    # execution runs OUTSIDE the typing() block so the reaction wait doesn't hang it.
+    ack_message = await send_response(message, answer)
+
+    if pending_action:
+        await handle_pending_action(bot, message, ack_message, pending_action)
+
     # Update conversation history
     await update_conversation_history(
         conversation, clean_message_content, answer, user_id, display_name, username, active_conv_key, openai_api_key

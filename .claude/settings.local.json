@@ -20,7 +20,10 @@
       "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/pip.exe\" --version)",
       "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe\" -c \"import site; print\\(site.getsitepackages\\(\\)\\)\")",
       "Bash(\"D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe\" -m pip install av)",
-      "Bash('D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe' -c ' *)"
+      "Bash('D:/Disc Bots/SandBox/ABGLuvr/.venv/Scripts/python.exe' -c ' *)",
+      "Bash(python -m py_compile src/utils/ai/message_processing.py)",
+      "Bash(python -m py_compile src/utils/interactions/actions.py src/utils/ai/message_processing.py src/bot.py)",
+      "Bash(python -c ' *)"
     ]
   }
 }
