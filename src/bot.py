@@ -97,6 +97,13 @@ async def on_ready():
     except Exception as e:
         import traceback
         traceback.print_exc()
+    # Re-arm any scheduled reminders that were persisted before a restart.
+    try:
+        from utils.interactions.actions import restore_scheduled_reminders
+        await restore_scheduled_reminders(bot)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -310,7 +317,9 @@ async def on_message(message: discord.Message):
 
     # Capture the sent ack so an interactive action can react to it. Confirmation/
     # execution runs OUTSIDE the typing() block so the reaction wait doesn't hang it.
-    ack_message = await send_response(message, answer)
+    # For ping/schedule acks, suppress mentions so the target isn't pinged (spoiled)
+    # by the acknowledgement — only the actual action should ping them.
+    ack_message = await send_response(message, answer, suppress_mentions=bool(pending_action))
 
     if pending_action:
         await handle_pending_action(bot, message, ack_message, pending_action)

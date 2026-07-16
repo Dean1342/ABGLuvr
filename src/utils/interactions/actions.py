@@ -9,8 +9,11 @@
 # All state is in-memory (matches the rest of the bot). Scheduled tasks are lost on
 # restart — long-delay acks warn the user about this.
 import asyncio
+import datetime
 import re
 import discord
+
+from utils.integrations import supabase_client as db
 
 # --- Guardrails / constants ---
 MAX_PING_COUNT = 10
@@ -20,8 +23,11 @@ LONG_DELAY_THRESHOLD = 3600          # >= 1 hour requires ✅ confirmation
 CONFIRM_EMOJI = "✅"
 CONFIRM_TIMEOUT = 120                # seconds to wait for the confirming reaction
 
-# In-memory tracking of live scheduled tasks (lost on bot restart).
-scheduled_tasks = {}                 # ack_message_id -> asyncio.Task
+# In-memory tracking of live timer tasks, keyed by the reminder's durable id (or a
+# "mem-..." id when the datastore was unavailable). Scheduled reminders are also
+# persisted to Supabase and rehydrated on startup, so they survive restarts.
+scheduled_tasks = {}                 # reminder_id -> asyncio.Task
+_reminders_restored = False          # guard: on_ready can fire on every reconnect
 
 # Mentions policy for every outbound send: allow pinging real users only, never
 # roles or @everyone/@here — defense-in-depth against a crafted note.
@@ -65,9 +71,11 @@ def get_interaction_function_schemas():
                     "target": {
                         "type": "string",
                         "description": (
-                            "The user to ping. Use the Discord mention token exactly as it appears in "
-                            "the message (e.g. '<@123456789>'), or their display name / username if no "
-                            "mention token is present. Never a role, @everyone, or @here."
+                            "The user to ping. Prefer the Discord mention token if the message has one "
+                            "(e.g. '<@123456789>'). If the user names the target WITHOUT tagging them "
+                            "(e.g. 'ping bob' — often deliberate so bob isn't notified early), pass that "
+                            "name/nickname string as-is; the bot resolves it against server members. "
+                            "Never a role, @everyone, or @here."
                         ),
                     },
                     "count": {
@@ -108,9 +116,11 @@ def get_interaction_function_schemas():
                     "target": {
                         "type": "string",
                         "description": (
-                            "The user to remind/ping. Use the Discord mention token exactly as it "
-                            "appears (e.g. '<@123456789>'), or their display name / username. "
-                            "Never a role, @everyone, or @here."
+                            "The user to remind/ping. Prefer the Discord mention token if present "
+                            "(e.g. '<@123456789>'). If the user names the target WITHOUT tagging them "
+                            "(e.g. 'remind bob in 2h' — often deliberate so bob isn't notified early), "
+                            "pass that name/nickname string as-is; the bot resolves it against server "
+                            "members. Never a role, @everyone, or @here."
                         ),
                     },
                     "delay_seconds": {
@@ -208,7 +218,11 @@ def build_ack_instruction(pending):
     if pending["type"] == "spam_ping":
         summary = f"send {pending['count']} separate @-ping messages to {target}"
     else:  # schedule_message
-        summary = f"ping {target} with a reminder in {_humanize_duration(pending['delay_seconds'])}"
+        when = _humanize_duration(pending["delay_seconds"])
+        if pending.get("note"):
+            summary = f"ping {target} in {when} with a message"
+        else:
+            summary = f"ping {target} in {when} (just a ping, no message)"
 
     if pending["requires_confirmation"]:
         instruction = (
@@ -326,8 +340,61 @@ async def execute_spam_ping(message, guild, pending):
         print(f"[actions] spam_ping send failed: {e}")
 
 
+def _parse_ts(value):
+    """Parse a Supabase timestamptz string into an aware UTC datetime."""
+    if isinstance(value, datetime.datetime):
+        dt = value
+    else:
+        dt = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+async def _fire_reminder(bot, reminder_id, channel_id, target_id, text):
+    """Send a due reminder ping, then remove it from memory and the durable store."""
+    try:
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except Exception:
+                channel = None
+        if channel is not None:
+            content = f"<@{target_id}> {text}".strip()
+            await channel.send(content, allowed_mentions=_USER_ONLY_MENTIONS)
+    except Exception as e:
+        print(f"[actions] reminder fire failed: {e}")
+    finally:
+        scheduled_tasks.pop(reminder_id, None)
+        # Only clean up rows that were actually persisted (memory-only ids are prefixed).
+        if not str(reminder_id).startswith("mem-"):
+            try:
+                await db.delete_reminder(reminder_id)
+            except Exception as e:
+                print(f"[actions] failed to delete reminder row {reminder_id}: {e}")
+
+
+def _arm_reminder(bot, reminder_id, channel_id, target_id, text, delay):
+    """Create the in-memory timer task that fires a reminder after `delay` seconds."""
+    existing = scheduled_tasks.get(reminder_id)
+    if existing is not None and not existing.done():
+        return  # already armed — don't double-fire
+
+    async def _runner():
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return  # shutdown — leave the DB row so it rehydrates on next start
+        await _fire_reminder(bot, reminder_id, channel_id, target_id, text)
+
+    scheduled_tasks[reminder_id] = asyncio.create_task(_runner())
+
+
 async def execute_scheduled_message(bot, channel, guild, pending, requester_id, ack_message):
-    """Resolve the target now (fail fast), then schedule the delayed send."""
+    """Resolve the target now (fail fast), persist the reminder so it survives a
+    restart, then arm the in-memory timer."""
     from utils.ai.message_processing import resolve_discord_user_id  # lazy: break import cycle
 
     raw_target = pending["target"]
@@ -342,21 +409,56 @@ async def execute_scheduled_message(bot, channel, guild, pending, requester_id, 
 
     delay = pending["delay_seconds"]
     text = _delivery_text(pending)
-    task_id = ack_message.id
+    fire_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=delay)
 
-    async def _runner():
+    # Persist first so a restart before firing doesn't lose it. Degrade gracefully to
+    # memory-only if the datastore is unavailable.
+    reminder_id = None
+    try:
+        reminder_id = await db.insert_reminder({
+            "channel_id": channel.id,
+            "target_id": target_id,
+            "requester_id": requester_id,
+            "guild_id": guild.id if guild else None,
+            "message": text,
+            "fire_at": fire_at.isoformat(),
+        })
+    except Exception as e:
+        print(f"[actions] failed to persist reminder (falling back to memory-only): {e}")
+    if reminder_id is None:
+        reminder_id = f"mem-{ack_message.id}"
+
+    _arm_reminder(bot, reminder_id, channel.id, target_id, text, delay)
+
+
+async def restore_scheduled_reminders(bot):
+    """Re-arm any persisted reminders on startup. Reminders that came due while the
+    bot was offline fire immediately. Safe to call from on_ready (which can fire on
+    reconnects) — it only does the reload once."""
+    global _reminders_restored
+    if _reminders_restored:
+        return
+    _reminders_restored = True
+    try:
+        rows = await db.get_pending_reminders()
+    except Exception as e:
+        print(f"[actions] could not load persisted reminders: {e}")
+        return
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    restored = 0
+    for r in rows:
         try:
-            await asyncio.sleep(delay)
-            content = f"<@{target_id}> {text}".strip()
-            await channel.send(content, allowed_mentions=_USER_ONLY_MENTIONS)
-        except asyncio.CancelledError:
-            pass
+            delay = max(0.0, (_parse_ts(r["fire_at"]) - now).total_seconds())
+            _arm_reminder(
+                bot, r["id"], int(r["channel_id"]), int(r["target_id"]),
+                r.get("message") or "", delay,
+            )
+            restored += 1
         except Exception as e:
-            print(f"[actions] scheduled message failed: {e}")
-        finally:
-            scheduled_tasks.pop(task_id, None)
-
-    scheduled_tasks[task_id] = asyncio.create_task(_runner())
+            print(f"[actions] skipping malformed reminder {r.get('id')}: {e}")
+    if restored:
+        print(f"[actions] restored {restored} scheduled reminder(s)")
 
 
 async def handle_pending_action(bot, message, ack_message, pending):

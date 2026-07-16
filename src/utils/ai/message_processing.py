@@ -20,13 +20,34 @@ from utils.interactions.actions import (
 
 
 def resolve_discord_user_id(user_str, guild):
-    # Resolve a Discord user mention or name to user ID
+    # Resolve a Discord user mention or name to a user ID. Accepts a raw mention token
+    # (<@id>), or a display name / username / global name so users can target someone
+    # by name without actually @-tagging (and pinging) them.
+    if not user_str:
+        return None
     match = re.match(r'<@!?(\d+)>', user_str)
     if match:
         return int(match.group(1))
-    member = discord.utils.find(lambda m: m.display_name == user_str or m.name == user_str, guild.members)
-    if member:
-        return member.id
+    if guild is None:
+        return None
+
+    needle = user_str.strip().lstrip('@').lower()
+    if not needle:
+        return None
+
+    def names_of(m):
+        return [n for n in (m.display_name, m.name, getattr(m, 'global_name', None)) if n]
+
+    # 1) Exact, case-insensitive match on any of the member's names.
+    for m in guild.members:
+        if any(n.lower() == needle for n in names_of(m)):
+            return m.id
+
+    # 2) Fallback: substring match, but only if it uniquely identifies one member
+    #    (avoids pinging the wrong person on an ambiguous partial name).
+    matches = [m for m in guild.members if any(needle in n.lower() for n in names_of(m))]
+    if len(matches) == 1:
+        return matches[0].id
     return None
 
 
@@ -319,19 +340,22 @@ async def handle_openai_response(client, messages, function_schemas, model, open
                     try:
                         pending_action = build_pending_action(func_name, args)
 
-                        # Craft the ACTUAL message sent to the target in the bot's own
-                        # persona voice (second person), unless the user wanted a verbatim
-                        # phrase. Done now (client available) so scheduled sends stay LLM-free.
-                        delivery_messages = messages + [
-                            {"role": "system", "content": build_delivery_instruction(pending_action)}
-                        ]
-                        delivery_resp = await client.chat.completions.create(
-                            model=model,
-                            messages=delivery_messages
-                        )
-                        crafted = (delivery_resp.choices[0].message.content or "").strip().strip('"').strip()
-                        if crafted:
-                            pending_action["delivery_text"] = crafted
+                        # Only craft a delivery message when the user actually gave something
+                        # to say. With no note it's just a bare ping — don't invent meta-text.
+                        if pending_action.get("note"):
+                            # Craft the ACTUAL message sent to the target in the bot's own
+                            # persona voice (second person), unless the user wanted a verbatim
+                            # phrase. Done now (client available) so scheduled sends stay LLM-free.
+                            delivery_messages = messages + [
+                                {"role": "system", "content": build_delivery_instruction(pending_action)}
+                            ]
+                            delivery_resp = await client.chat.completions.create(
+                                model=model,
+                                messages=delivery_messages
+                            )
+                            crafted = (delivery_resp.choices[0].message.content or "").strip().strip('"').strip()
+                            if crafted:
+                                pending_action["delivery_text"] = crafted
 
                         # Persona-voiced acknowledgement to the requester.
                         instruction = build_ack_instruction(pending_action)
@@ -366,18 +390,21 @@ async def handle_openai_response(client, messages, function_schemas, model, open
     return None, "⚠️ An unexpected error occurred while processing your request.", None
 
 
-async def send_response(message, answer):
+async def send_response(message, answer, suppress_mentions=False):
     # Send a response to Discord. Returns the primary sent message so callers can
     # act on it (e.g. attach a confirmation reaction for interactive actions).
+    # suppress_mentions=True stops the reply from pinging anyone — used for the ack of
+    # a ping/schedule action so the target isn't notified (spoiled) before it fires.
     answer = format_discord_links(answer)
     max_len = 2000
+    kwargs = {"allowed_mentions": discord.AllowedMentions.none()} if suppress_mentions else {}
 
     if len(answer) <= max_len:
-        return await message.reply(answer)
+        return await message.reply(answer, **kwargs)
     else:
         first = None
         for i in range(0, len(answer), max_len):
-            sent = await message.channel.send(answer[i:i+max_len])
+            sent = await message.channel.send(answer[i:i+max_len], **kwargs)
             if first is None:
                 first = sent
         return first

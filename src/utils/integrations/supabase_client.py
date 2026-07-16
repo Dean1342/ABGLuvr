@@ -121,3 +121,41 @@ async def delete_labor(user_id: int, labor_id: str) -> bool:
         .execute()
     )
     return bool(result.data)
+
+
+# --- scheduled_reminders ---
+# Durable storage for scheduled ping/reminder actions so they survive bot restarts.
+# Table DDL (run once in Supabase):
+#   create table scheduled_reminders (
+#     id uuid primary key default gen_random_uuid(),
+#     channel_id  bigint      not null,
+#     target_id   bigint      not null,
+#     requester_id bigint     not null,
+#     guild_id    bigint,
+#     message     text,
+#     fire_at     timestamptz not null,
+#     created_at  timestamptz default now()
+#   );
+
+async def insert_reminder(data: dict) -> str | None:
+    client = await get_client()
+    result = await client.table("scheduled_reminders").insert(data).execute()
+    if result.data:
+        return result.data[0].get("id")
+    return None
+
+
+async def get_pending_reminders() -> list[dict]:
+    client = await get_client()
+    result = (
+        await client.table("scheduled_reminders")
+        .select("*")
+        .order("fire_at")
+        .execute()
+    )
+    return result.data or []
+
+
+async def delete_reminder(reminder_id: str) -> None:
+    client = await get_client()
+    await client.table("scheduled_reminders").delete().eq("id", reminder_id).execute()
