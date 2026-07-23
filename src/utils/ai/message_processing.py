@@ -332,11 +332,11 @@ async def handle_openai_response(client, messages, function_schemas, model, open
                         print(f"Error in currency conversion: {e}")
                         answer = "❌ Currency conversion failed due to an unexpected error. Please try again."
 
-                elif func_name in ("spam_ping", "schedule_message"):
-                    # These require Discord context (guild/channel/reactions) that doesn't
+                elif func_name == "ping_user":
+                    # This requires Discord context (guild/channel/reactions) that doesn't
                     # exist here, so we don't execute — we build a normalized pending action
-                    # and return it up to on_message. The ack itself is generated in the
-                    # persona's voice via a second, function-free completion.
+                    # and return it up to on_message. The ack is generated in the persona's
+                    # voice via a second, function-free completion.
                     try:
                         pending_action = build_pending_action(func_name, args)
 
@@ -344,9 +344,12 @@ async def handle_openai_response(client, messages, function_schemas, model, open
                         # to say. With no note it's just a bare ping — don't invent meta-text.
                         if pending_action.get("note"):
                             # Craft the ACTUAL message sent to the target in the bot's own
-                            # persona voice (second person), unless the user wanted a verbatim
-                            # phrase. Done now (client available) so scheduled sends stay LLM-free.
-                            delivery_messages = messages + [
+                            # persona voice (second person). Fed ONLY the persona system prompt
+                            # + the note (NOT the scheduling conversation) so timing/count phrasing
+                            # can't leak into the delivered message. Done now (client available)
+                            # so scheduled sends stay LLM-free.
+                            persona_system = messages[0] if messages and messages[0].get("role") == "system" else None
+                            delivery_messages = ([persona_system] if persona_system else []) + [
                                 {"role": "system", "content": build_delivery_instruction(pending_action)}
                             ]
                             delivery_resp = await client.chat.completions.create(
@@ -357,7 +360,7 @@ async def handle_openai_response(client, messages, function_schemas, model, open
                             if crafted:
                                 pending_action["delivery_text"] = crafted
 
-                        # Persona-voiced acknowledgement to the requester.
+                        # Persona-voiced acknowledgement to the requester (full context is fine here).
                         instruction = build_ack_instruction(pending_action)
                         final_messages = messages + [{"role": "system", "content": instruction}]
                         response2 = await client.chat.completions.create(

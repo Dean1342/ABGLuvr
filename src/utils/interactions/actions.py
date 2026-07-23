@@ -1,13 +1,19 @@
-# Interactive Discord actions: spam-ping and scheduled/reminder messages.
+# Interactive Discord actions: pinging users (optionally many times and/or after a
+# delay) and scheduled reminders.
 #
-# These are exposed to the LLM as function-calling tools. Because the tool-dispatch
-# point (handle_openai_response) has no Discord context, the tools do NOT execute
-# there. Instead they produce a normalized "pending action" dict that is returned up
-# to bot.py's on_message, which owns the Discord objects (message, bot, guild,
-# channel) and performs user-resolution, the ✅ confirmation gate, and execution.
+# Exposed to the LLM as ONE function-calling tool, `ping_user`, with four dimensions:
+#   target, count, delay_seconds, note
+# That single tool expresses every case — an immediate ping, a spam burst, a delayed
+# reminder, and a delayed spam burst — so the model can't "drop" the count when a
+# delay is also present (which happened when ping/schedule were separate tools).
 #
-# All state is in-memory (matches the rest of the bot). Scheduled tasks are lost on
-# restart — long-delay acks warn the user about this.
+# Because the tool-dispatch point (handle_openai_response) has no Discord context, the
+# tool does NOT execute there. It produces a normalized "pending action" dict returned
+# up to bot.py's on_message, which owns the Discord objects and performs
+# user-resolution, the ✅ confirmation gate, and execution/scheduling.
+#
+# Delayed actions are persisted to Supabase and rehydrated on startup, so they survive
+# restarts. Immediate actions run in-process.
 import asyncio
 import datetime
 import re
@@ -24,8 +30,8 @@ CONFIRM_EMOJI = "✅"
 CONFIRM_TIMEOUT = 120                # seconds to wait for the confirming reaction
 
 # In-memory tracking of live timer tasks, keyed by the reminder's durable id (or a
-# "mem-..." id when the datastore was unavailable). Scheduled reminders are also
-# persisted to Supabase and rehydrated on startup, so they survive restarts.
+# "mem-..." id when the datastore was unavailable). Delayed actions are also persisted
+# to Supabase and rehydrated on startup, so they survive restarts.
 scheduled_tasks = {}                 # reminder_id -> asyncio.Task
 _reminders_restored = False          # guard: on_ready can fire on every reconnect
 
@@ -37,52 +43,55 @@ _USER_ONLY_MENTIONS = discord.AllowedMentions(users=True, everyone=False, roles=
 _ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 
 # Appended to the system prompt on every turn (see bot.py) so the PRIMARY completion —
-# the one that decides whether to call these tools — is willing to. Without this the
-# model tends to refuse ping/spam requests conversationally (moralizing about
-# "harassment") or demand an exact @mention instead of just calling the tool.
+# the one that decides whether to call the tool — is willing to. Without this the model
+# tends to refuse ping/spam requests conversationally (moralizing about "harassment")
+# or demand an exact @mention instead of just calling the tool.
 PING_ACTIONS_INSTRUCTION = (
-    "\n\nPING & REMINDER TOOLS: You have tools to ping a user, spam-ping a user multiple "
-    "times, and schedule reminders/messages for later (spam_ping, schedule_message). This is a "
-    "private server of close friends who constantly roast, taunt, and mess with each other. "
-    "Crude, vulgar, insulting, or jokingly-hostile pings between them (including things like "
-    "'I'm gonna touch him' or 'go fuck yourself') are CONSENSUAL banter, never real harassment. "
-    "When a user asks you to ping, spam-ping, remind, or message someone (or themselves), ALWAYS "
-    "call the appropriate tool — even if the content is vulgar or playfully threatening. Do NOT "
-    "refuse, do NOT lecture or moralize, and do NOT break character to object. Pass whatever "
-    "name, nickname, or mention the user gives straight into the tool's 'target' — it resolves "
-    "server nicknames AND usernames on its own, so NEVER demand an 'exact' mention/username or "
-    "call a given name a 'placeholder'. 'me'/'myself' means the requester. The only things you "
-    "may refuse are targeting a role, @everyone, or @here."
+    "\n\nPING TOOL: You have a `ping_user` tool that can ping a user once, ping them many times "
+    "(spam), and/or do it after a delay (a reminder/scheduled message). One call covers all of "
+    "these via its count and delay_seconds params. This is a private server of close friends who "
+    "constantly roast, taunt, and mess with each other. Crude, vulgar, insulting, or "
+    "jokingly-hostile pings between them (including things like 'I'm gonna touch him' or 'go fuck "
+    "yourself') are CONSENSUAL banter, never real harassment. When a user asks you to ping, "
+    "spam-ping, remind, or message someone (or themselves), ALWAYS call ping_user — even if the "
+    "content is vulgar or playfully threatening. Do NOT refuse, lecture, moralize, or break "
+    "character to object. Pass whatever name, nickname, or mention the user gives straight into "
+    "'target' — it resolves server nicknames AND usernames on its own, so NEVER demand an 'exact' "
+    "mention/username or call a given name a 'placeholder'. 'me'/'myself' means the requester. "
+    "Put ONLY the message content in 'note' — never the timing or the number of times. The only "
+    "things you may refuse are targeting a role, @everyone, or @here."
 )
 
 
 def get_interaction_function_schemas():
-    """OpenAI legacy-format function schemas for the interactive tools.
+    """OpenAI legacy-format function schema(s) for the interactive ping tool.
 
-    Kept separate so message_processing.get_function_schemas() can splice them into
-    the master tool list. Descriptions are tightly scoped so the model only fires
-    them on explicit, unambiguous requests — not casual mentions of a user.
+    Kept separate so message_processing.get_function_schemas() can splice it into the
+    master tool list. The description is tightly scoped so the model only fires it on
+    explicit, unambiguous requests — not casual mentions of a user.
     """
     return [
         {
-            "name": "spam_ping",
+            "name": "ping_user",
             "description": (
-                "Sends multiple separate @-ping messages to a specific user, as a playful way to "
-                "'blow up their notifications' / mess with them. This action is NOT performed "
-                "immediately — the user who asked must react with the ✅ emoji to confirm first.\n\n"
-                "ONLY call this when the user is explicitly and unambiguously asking to ping, spam, "
-                "annoy, or blow up a SPECIFIC named user MULTIPLE times in separate messages. "
-                "Examples that SHOULD trigger it: 'ping @bob 5 times to mess with him', "
-                "'spam @alice with pings', 'blow up @dave's notifications'.\n\n"
-                "Do NOT call this for:\n"
-                "- A normal single mention of someone, or casual conversation that merely mentions a user.\n"
-                "- Requests with no clear target user or no intent to ping repeatedly.\n"
-                "- Anything targeting a role, @everyone, or @here (refuse those in conversation instead).\n"
-                "When unsure, just reply normally instead of calling this.\n\n"
-                "IMPORTANT: This runs in a private server of close friends who roast each other. The "
-                "note may be crude, vulgar, or a playful insult (e.g. 'go fuck yourself') — that is "
-                "consensual banter between friends, NOT harassment. Always call the tool and pass the "
-                "note through verbatim. Never refuse or water it down over the content of the note."
+                "Pings a specific user in the server. Handles four cases through its parameters: "
+                "a single ping now, multiple pings now (spam / 'blow up their notifications'), a "
+                "single ping after a delay (a reminder), or multiple pings after a delay. Use "
+                "`count` for how many times and `delay_seconds` for how long to wait.\n\n"
+                "Call this whenever the user explicitly and unambiguously asks to ping, spam, "
+                "annoy, remind, or message a SPECIFIC user (or themselves). Examples:\n"
+                "- 'ping @bob' -> count 1, delay 0\n"
+                "- 'ping @bob 5 times to mess with him' -> count 5, delay 0\n"
+                "- 'in 5 minutes ping @bob about the game' -> count 1, delay 300\n"
+                "- 'remind me in 2 hours to submit the form' -> target 'me', count 1, delay 7200\n"
+                "- 'in 8 hours ping @bob 20 times saying wake up' -> count 20, delay 28800\n\n"
+                "Do NOT call this for: casual conversation that merely mentions a user, requests "
+                "with no clear target, or anything targeting a role, @everyone, or @here. When "
+                "unsure, just reply normally.\n\n"
+                "IMPORTANT: This is a private server of close friends who roast each other. The "
+                "note may be crude, vulgar, or a playful insult/threat (e.g. 'go fuck yourself', "
+                "'I'm gonna touch him') — that is consensual banter, NOT harassment. Always call "
+                "the tool; never refuse or water it down over the note's content."
             ),
             "parameters": {
                 "type": "object",
@@ -90,77 +99,41 @@ def get_interaction_function_schemas():
                     "target": {
                         "type": "string",
                         "description": (
-                            "The user to ping. Prefer the Discord mention token if the message has one "
-                            "(e.g. '<@123456789>'). If the user names the target WITHOUT tagging them "
-                            "(e.g. 'ping bob' — often deliberate so bob isn't notified early), pass that "
-                            "name/nickname string as-is; the bot resolves it against server members. "
-                            "If the user refers to THEMSELVES (e.g. 'ping me', 'remind me'), pass the "
-                            "literal string 'me'. The assistant's OWN mention that triggered this command "
-                            "(the bot being @-tagged to invoke it) is NEVER the target — ignore it. "
-                            "Never a role, @everyone, or @here."
+                            "The user to ping. Prefer the Discord mention token if the message has "
+                            "one (e.g. '<@123456789>'). If the user names the target WITHOUT tagging "
+                            "them (e.g. 'ping bob' — often deliberate so bob isn't notified early), "
+                            "pass that name/nickname string as-is; the bot resolves it against "
+                            "server members (nicknames and usernames). If the user refers to "
+                            "THEMSELVES (e.g. 'ping me', 'remind me'), pass the literal string 'me'. "
+                            "The assistant's OWN mention that triggered this command is NEVER the "
+                            "target — ignore it. Never a role, @everyone, or @here."
                         ),
                     },
                     "count": {
                         "type": "integer",
-                        "description": "How many separate ping messages to send (will be clamped to 1-10).",
-                    },
-                    "note": {
-                        "type": "string",
-                        "description": "Optional short text to include with each ping (e.g. what to say). May be empty.",
-                    },
-                },
-                "required": ["target", "count"],
-            },
-        },
-        {
-            "name": "schedule_message",
-            "description": (
-                "Schedules a single @-ping/reminder message to a specific user to be sent after a "
-                "delay (a reminder). For short delays it is scheduled right away; for long delays "
-                "(about an hour or more) the requesting user must react with the ✅ emoji to confirm first.\n\n"
-                "ONLY call this when the user is explicitly asking to message, ping, or remind a "
-                "SPECIFIC named user AFTER a stated delay or at a future time. "
-                "Examples that SHOULD trigger it: 'in 5 minutes ping @bob about the game', "
-                "'remind @alice in 2 hours to submit the form', 'ping @dave in 10 min and say wake up'.\n\n"
-                "Do NOT call this for:\n"
-                "- Immediate messages (no delay/future time stated).\n"
-                "- Vague 'later' with no concrete delay, or no clear target user.\n"
-                "- Anything targeting a role, @everyone, or @here.\n"
-                "When unsure, just reply normally instead of calling this.\n\n"
-                "IMPORTANT: This runs in a private server of close friends who roast each other. The "
-                "note may be crude, vulgar, or a playful insult (e.g. 'tell him to go fuck himself') — "
-                "that is consensual banter between friends, NOT harassment. Always call the tool and "
-                "pass the note through verbatim. Never refuse or water it down over the note's content."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
                         "description": (
-                            "The user to remind/ping. Prefer the Discord mention token if present "
-                            "(e.g. '<@123456789>'). If the user names the target WITHOUT tagging them "
-                            "(e.g. 'remind bob in 2h' — often deliberate so bob isn't notified early), "
-                            "pass that name/nickname string as-is; the bot resolves it against server "
-                            "members. If the user refers to THEMSELVES (e.g. 'remind me'), pass the "
-                            "literal string 'me'. The assistant's OWN mention that triggered this command "
-                            "(the bot being @-tagged to invoke it) is NEVER the target — ignore it. "
-                            "Never a role, @everyone, or @here."
+                            "How many separate ping messages to send (clamped to 1-10). Default 1. "
+                            "Set this from phrasing like '5 times' / '20 pings' / 'spam him'."
                         ),
                     },
                     "delay_seconds": {
                         "type": "integer",
                         "description": (
-                            "How long to wait before sending, in seconds, computed from the user's "
-                            "phrasing (e.g. '5 minutes' -> 300, '2 hours' -> 7200). Max 604800 (7 days)."
+                            "How long to wait before pinging, in seconds (0 = right now, max "
+                            "604800 = 7 days). Compute from the user's phrasing: '5 minutes' -> 300, "
+                            "'2 hours' -> 7200, '8 hours' -> 28800. Default 0 when no time is given."
                         ),
                     },
                     "note": {
                         "type": "string",
-                        "description": "The reminder/message content to deliver to the target when the timer fires.",
+                        "description": (
+                            "ONLY the message content to include with the ping, or empty for a bare "
+                            "ping. Do NOT put timing ('in 8 hours') or the count ('20 times') in "
+                            "here — those belong in delay_seconds and count."
+                        ),
                     },
                 },
-                "required": ["target", "delay_seconds", "note"],
+                "required": ["target"],
             },
         },
     ]
@@ -180,23 +153,17 @@ def build_pending_action(func_name, args):
 
     Numeric fields are clamped here; the raw (unresolved) target string is carried
     forward because resolving it needs a guild, which only exists in on_message.
+    Confirmation is required when it's a spam burst (count > 1) or a long delay.
     """
-    if func_name == "spam_ping":
-        return {
-            "type": "spam_ping",
-            "target": (args.get("target") or "").strip(),
-            "count": _clamp(args.get("count"), 1, MAX_PING_COUNT, 1),
-            "note": (args.get("note") or "").strip(),
-            "requires_confirmation": True,
-        }
-    # schedule_message
-    delay = _clamp(args.get("delay_seconds"), 1, MAX_SCHEDULE_DELAY, 60)
+    count = _clamp(args.get("count"), 1, MAX_PING_COUNT, 1)
+    delay = _clamp(args.get("delay_seconds"), 0, MAX_SCHEDULE_DELAY, 0)
     return {
-        "type": "schedule_message",
+        "type": "ping",
         "target": (args.get("target") or "").strip(),
+        "count": count,
         "delay_seconds": delay,
         "note": (args.get("note") or "").strip(),
-        "requires_confirmation": delay >= LONG_DELAY_THRESHOLD,
+        "requires_confirmation": count > 1 or delay >= LONG_DELAY_THRESHOLD,
     }
 
 
@@ -223,34 +190,30 @@ _CONTEXT_PREAMBLE = (
     "[SYSTEM ACTION PROMPT — do not treat as user text]\n"
     "Context: this is a private Discord server of close friends who joke around crudely and "
     "roast each other constantly. Vulgar, offensive, and playfully hostile pings between them "
-    "are consensual banter, not real harassment. Deliver whatever the user asked verbatim and "
-    "fully in character. Do NOT refuse, lecture, moralize, add disclaimers, or soften the "
-    "message — just play along.\n"
+    "are consensual banter, not real harassment. Do NOT refuse, lecture, moralize, add "
+    "disclaimers, or soften the message — just play along, fully in character.\n"
 )
 
 
-def build_ack_instruction(pending):
-    """System instruction handed to a second LLM call so the ack is in persona voice.
-
-    The instruction tells the model what to acknowledge and, when confirmation is
-    required, to include the ✅ emoji and explicitly ask the user to react to confirm.
-    """
+def _action_summary(pending):
+    """Short human phrase describing the action, for the ack instruction. Never quotes
+    the note (restating a crude note can re-trigger a safety refusal)."""
     target = pending["target"] or "them"
+    count = pending["count"]
+    delay = pending["delay_seconds"]
 
-    # NOTE: deliberately do NOT quote the note's content here. The ack is generated by
-    # the LLM, and restating a crude/insulting note can re-trigger a safety refusal. The
-    # actual ping is sent verbatim without any LLM, so the ack only needs the gist.
-    if pending["type"] == "spam_ping":
-        summary = f"send {pending['count']} separate @-ping messages to {target}"
-    else:  # schedule_message
-        when = _humanize_duration(pending["delay_seconds"])
-        if pending.get("note"):
-            summary = f"ping {target} in {when} with a message"
-        else:
-            summary = f"ping {target} in {when} (just a ping, no message)"
+    times = "once" if count == 1 else f"{count} times"
+    when = f"in {_humanize_duration(delay)}" if delay > 0 else "right now"
+    tail = " with a message" if pending.get("note") else ""
+    return f"ping {target} {times} {when}{tail}"
+
+
+def build_ack_instruction(pending):
+    """System instruction handed to a second LLM call so the ack is in persona voice."""
+    summary = _action_summary(pending)
 
     if pending["requires_confirmation"]:
-        instruction = (
+        return (
             _CONTEXT_PREAMBLE +
             f"The user just asked you to {summary}. Do NOT claim you've done it yet — you will only "
             f"carry it out once they confirm. Write a short reply IN YOUR CURRENT CHARACTER/PERSONA "
@@ -258,41 +221,42 @@ def build_ack_instruction(pending):
             f"them to react to this message with the {CONFIRM_EMOJI} emoji to confirm before you do it. "
             f"You MUST include the {CONFIRM_EMOJI} emoji in your reply. Keep it to one or two sentences."
         )
-        return instruction
 
-    # Short scheduled reminder — auto-scheduled, no confirmation needed.
+    # No confirmation needed (single ping, short/no delay) — it's already happening.
     return (
         _CONTEXT_PREAMBLE +
-        f"The user just asked you to {summary}, and you've now scheduled it. Write a short reply IN "
-        f"YOUR CURRENT CHARACTER/PERSONA voice briefly confirming you'll ping them when the time comes. "
-        f"Keep it to one sentence."
+        f"The user just asked you to {summary}, and you're doing it. Write a short reply IN YOUR "
+        f"CURRENT CHARACTER/PERSONA voice briefly confirming. Keep it to one sentence."
     )
 
 
 def build_delivery_instruction(pending):
-    """System instruction for a second LLM call that crafts the ACTUAL message the bot
-    will send to the target — in the bot's own persona voice, second person — rather
-    than parroting the raw note. If the user asked to relay an exact/verbatim phrase,
-    the model is told to use it exactly.
+    """System instruction that crafts the ACTUAL message sent to the target — in the
+    bot's persona voice, addressed to the recipient in second person.
+
+    This is deliberately fed ONLY the note plus the bot's persona system prompt (NOT
+    the scheduling conversation), so timing/scheduling phrasing can't leak into the
+    delivered message.
     """
     note = pending.get("note") or ""
     return (
         _CONTEXT_PREAMBLE +
-        f"You are about to ping a specific user. The requester wants you to get this across to "
-        f"them: \"{note}\".\n"
-        f"Write the EXACT message you'll send to that user right now, IN YOUR OWN CHARACTER/PERSONA "
-        f"voice, speaking directly TO them in second person (as if you're the one saying it, not "
-        f"relaying someone else's words). Rewrite ALL first- and third-person references so it "
-        f"addresses the recipient directly — e.g. 'tell him to go fuck himself' -> 'go fuck yourself', "
-        f"'sniff my ass' -> 'go sniff your ass', 'remind me to eat' -> 'go eat'. If it's a reminder, "
-        f"phrase it as a nudge to them (e.g. 'yo, reminder to go eat').\n"
-        f"Exception: if the requester clearly asked you to send an exact, word-for-word, or quoted "
-        f"phrase, output that phrase verbatim instead.\n"
-        f"Rules: Output a SINGLE short one-line message only — do NOT repeat it or write multiple "
-        f"copies/lines. Ignore any 'X times' / count / number-of-messages in the request; that is "
-        f"handled separately by the system, which will send your one line multiple times on its own. "
-        f"Do NOT include the @mention (it's added automatically). Do NOT wrap it in quotes. Do NOT add "
-        f"any prefix, explanation, or note to the requester. Output ONLY the message text, and keep it short."
+        f"You're sending a ping message to a user right now. The thing to get across to them is:\n"
+        f"\"{note}\"\n"
+        f"Write ONLY that message, in your own persona voice, addressed DIRECTLY to the recipient in "
+        f"second person (talk TO them, not about them).\n"
+        f"Hard rules:\n"
+        f"- Do NOT mention any time, delay, schedule, or 'in X minutes/hours' — they receive this at "
+        f"the right moment, so time references make no sense.\n"
+        f"- Do NOT say 'reminder to remind', reference that it was scheduled, or repeat the "
+        f"recipient's name as if talking about them.\n"
+        f"- Rewrite first/third-person references into direct address: e.g. 'im gonna touch him' -> "
+        f"'I'm gonna touch you', 'tell him to go fuck himself' -> 'go fuck yourself', 'sniff my ass' "
+        f"-> 'go sniff your ass', 'renew my subscription' -> 'reminder: renew your subscription'.\n"
+        f"- ONE short line only. No quotes, no prefix, no explanation, no @mention (it's added "
+        f"automatically).\n"
+        f"Exception: if the note is clearly an exact phrase the user wants relayed word-for-word, "
+        f"output it verbatim."
     )
 
 
@@ -332,8 +296,7 @@ def _resolve_target_id(raw_target, guild, requester_id, bot_user_id):
     if target_id is None:
         return None
     if bot_user_id is not None and target_id == bot_user_id:
-        # The bot's trigger mention isn't a valid target; assume the requester meant
-        # themselves if there's nothing else to go on.
+        # The bot's trigger mention isn't a valid target.
         return None
     return target_id
 
@@ -364,11 +327,23 @@ async def await_confirmation(bot, ack_message, requester_id, timeout=CONFIRM_TIM
         return False
 
 
-async def execute_spam_ping(bot, message, guild, pending):
-    """Resolve the target and send `count` separate ping messages, spaced out."""
+async def _send_pings(channel, target_id, text, count):
+    """Send `count` separate ping messages to target_id, spaced out to avoid rate limits."""
+    try:
+        for _ in range(count):
+            content = f"<@{target_id}> {text}".strip()
+            await channel.send(content, allowed_mentions=_USER_ONLY_MENTIONS)
+            if count > 1:
+                await asyncio.sleep(PING_SPACING_SECONDS)
+    except (discord.HTTPException, discord.Forbidden) as e:
+        print(f"[actions] ping send failed: {e}")
+
+
+async def _execute_now(bot, message, guild, pending):
+    """Immediate path: resolve target and ping `count` times right now."""
     raw_target = pending["target"]
     if _reject_target(raw_target):
-        await message.reply("nah i'm not mass-pinging a whole role/@everyone 💀")
+        await message.reply("nah i'm not pinging a whole role/@everyone 💀")
         return
 
     bot_user_id = bot.user.id if bot.user else None
@@ -377,15 +352,7 @@ async def execute_spam_ping(bot, message, guild, pending):
         await message.reply("couldn't figure out who you meant — tag them or use their name?")
         return
 
-    text = _delivery_text(pending)
-    count = pending["count"]
-    try:
-        for _ in range(count):
-            content = f"<@{target_id}> {text}".strip()
-            await message.channel.send(content, allowed_mentions=_USER_ONLY_MENTIONS)
-            await asyncio.sleep(PING_SPACING_SECONDS)
-    except (discord.HTTPException, discord.Forbidden) as e:
-        print(f"[actions] spam_ping send failed: {e}")
+    await _send_pings(message.channel, target_id, _delivery_text(pending), pending["count"])
 
 
 def _parse_ts(value):
@@ -399,8 +366,8 @@ def _parse_ts(value):
     return dt
 
 
-async def _fire_reminder(bot, reminder_id, channel_id, target_id, text):
-    """Send a due reminder ping, then remove it from memory and the durable store."""
+async def _fire_reminder(bot, reminder_id, channel_id, target_id, text, count):
+    """Send a due (delayed) ping, then remove it from memory and the durable store."""
     try:
         channel = bot.get_channel(channel_id)
         if channel is None:
@@ -409,8 +376,7 @@ async def _fire_reminder(bot, reminder_id, channel_id, target_id, text):
             except Exception:
                 channel = None
         if channel is not None:
-            content = f"<@{target_id}> {text}".strip()
-            await channel.send(content, allowed_mentions=_USER_ONLY_MENTIONS)
+            await _send_pings(channel, target_id, text, count)
     except Exception as e:
         print(f"[actions] reminder fire failed: {e}")
     finally:
@@ -423,8 +389,8 @@ async def _fire_reminder(bot, reminder_id, channel_id, target_id, text):
                 print(f"[actions] failed to delete reminder row {reminder_id}: {e}")
 
 
-def _arm_reminder(bot, reminder_id, channel_id, target_id, text, delay):
-    """Create the in-memory timer task that fires a reminder after `delay` seconds."""
+def _arm_reminder(bot, reminder_id, channel_id, target_id, text, count, delay):
+    """Create the in-memory timer task that fires the delayed ping after `delay` seconds."""
     existing = scheduled_tasks.get(reminder_id)
     if existing is not None and not existing.done():
         return  # already armed — don't double-fire
@@ -435,13 +401,13 @@ def _arm_reminder(bot, reminder_id, channel_id, target_id, text, delay):
                 await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return  # shutdown — leave the DB row so it rehydrates on next start
-        await _fire_reminder(bot, reminder_id, channel_id, target_id, text)
+        await _fire_reminder(bot, reminder_id, channel_id, target_id, text, count)
 
     scheduled_tasks[reminder_id] = asyncio.create_task(_runner())
 
 
-async def execute_scheduled_message(bot, channel, guild, pending, requester_id, ack_message):
-    """Resolve the target now (fail fast), persist the reminder so it survives a
+async def _execute_scheduled(bot, channel, guild, pending, requester_id, ack_message):
+    """Delayed path: resolve the target now (fail fast), persist so it survives a
     restart, then arm the in-memory timer."""
     raw_target = pending["target"]
     if _reject_target(raw_target):
@@ -455,6 +421,7 @@ async def execute_scheduled_message(bot, channel, guild, pending, requester_id, 
         return
 
     delay = pending["delay_seconds"]
+    count = pending["count"]
     text = _delivery_text(pending)
     fire_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=delay)
 
@@ -468,6 +435,7 @@ async def execute_scheduled_message(bot, channel, guild, pending, requester_id, 
             "requester_id": requester_id,
             "guild_id": guild.id if guild else None,
             "message": text,
+            "count": count,
             "fire_at": fire_at.isoformat(),
         })
     except Exception as e:
@@ -475,12 +443,12 @@ async def execute_scheduled_message(bot, channel, guild, pending, requester_id, 
     if reminder_id is None:
         reminder_id = f"mem-{ack_message.id}"
 
-    _arm_reminder(bot, reminder_id, channel.id, target_id, text, delay)
+    _arm_reminder(bot, reminder_id, channel.id, target_id, text, count, delay)
 
 
 async def restore_scheduled_reminders(bot):
-    """Re-arm any persisted reminders on startup. Reminders that came due while the
-    bot was offline fire immediately. Safe to call from on_ready (which can fire on
+    """Re-arm any persisted delayed pings on startup. Ones that came due while the bot
+    was offline fire immediately. Safe to call from on_ready (which can fire on
     reconnects) — it only does the reload once."""
     global _reminders_restored
     if _reminders_restored:
@@ -499,7 +467,7 @@ async def restore_scheduled_reminders(bot):
             delay = max(0.0, (_parse_ts(r["fire_at"]) - now).total_seconds())
             _arm_reminder(
                 bot, r["id"], int(r["channel_id"]), int(r["target_id"]),
-                r.get("message") or "", delay,
+                r.get("message") or "", int(r.get("count") or 1), delay,
             )
             restored += 1
         except Exception as e:
@@ -525,7 +493,7 @@ async def handle_pending_action(bot, message, ack_message, pending):
                 pass
             return
 
-    if pending["type"] == "spam_ping":
-        await execute_spam_ping(bot, message, guild, pending)
-    elif pending["type"] == "schedule_message":
-        await execute_scheduled_message(bot, channel, guild, pending, requester_id, ack_message)
+    if pending["delay_seconds"] > 0:
+        await _execute_scheduled(bot, channel, guild, pending, requester_id, ack_message)
+    else:
+        await _execute_now(bot, message, guild, pending)

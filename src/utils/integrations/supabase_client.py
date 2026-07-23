@@ -133,9 +133,12 @@ async def delete_labor(user_id: int, labor_id: str) -> bool:
 #     requester_id bigint     not null,
 #     guild_id    bigint,
 #     message     text,
+#     count       int         not null default 1,
 #     fire_at     timestamptz not null,
 #     created_at  timestamptz default now()
 #   );
+# If you already created the table without `count`, run:
+#   alter table scheduled_reminders add column count int not null default 1;
 
 async def insert_reminder(data: dict) -> str | None:
     client = await get_client()
