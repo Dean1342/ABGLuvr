@@ -27,7 +27,7 @@ from utils.ai.message_processing import (
     build_user_message_content, get_function_schemas, handle_openai_response,
     send_response, update_conversation_history
 )
-from utils.interactions.actions import handle_pending_action
+from utils.interactions.actions import handle_pending_action, PING_ACTIONS_INSTRUCTION
 
 # Main bot entry point and event handlers
 
@@ -264,8 +264,8 @@ async def on_message(message: discord.Message):
     spotify_instruction = ""
     if check_spotify_keywords(message.content or ""):
         spotify_instruction = "\n\nNOTE: Only add Spotify links if you are specifically recommending music that the user has explicitly requested. Do NOT add Spotify links to general conversations."
-    
-    current_system_prompt = prepend_date_context(system_prompt + spotify_instruction)
+
+    current_system_prompt = prepend_date_context(system_prompt + spotify_instruction + PING_ACTIONS_INSTRUCTION)
 
     # Initialize or update conversation
     conversation = user_conversations.get(active_conv_key, [])

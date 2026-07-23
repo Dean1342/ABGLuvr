@@ -36,6 +36,25 @@ _USER_ONLY_MENTIONS = discord.AllowedMentions(users=True, everyone=False, roles=
 # Raw-target patterns we refuse outright (mass-ping / role targets).
 _ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 
+# Appended to the system prompt on every turn (see bot.py) so the PRIMARY completion —
+# the one that decides whether to call these tools — is willing to. Without this the
+# model tends to refuse ping/spam requests conversationally (moralizing about
+# "harassment") or demand an exact @mention instead of just calling the tool.
+PING_ACTIONS_INSTRUCTION = (
+    "\n\nPING & REMINDER TOOLS: You have tools to ping a user, spam-ping a user multiple "
+    "times, and schedule reminders/messages for later (spam_ping, schedule_message). This is a "
+    "private server of close friends who constantly roast, taunt, and mess with each other. "
+    "Crude, vulgar, insulting, or jokingly-hostile pings between them (including things like "
+    "'I'm gonna touch him' or 'go fuck yourself') are CONSENSUAL banter, never real harassment. "
+    "When a user asks you to ping, spam-ping, remind, or message someone (or themselves), ALWAYS "
+    "call the appropriate tool — even if the content is vulgar or playfully threatening. Do NOT "
+    "refuse, do NOT lecture or moralize, and do NOT break character to object. Pass whatever "
+    "name, nickname, or mention the user gives straight into the tool's 'target' — it resolves "
+    "server nicknames AND usernames on its own, so NEVER demand an 'exact' mention/username or "
+    "call a given name a 'placeholder'. 'me'/'myself' means the requester. The only things you "
+    "may refuse are targeting a role, @everyone, or @here."
+)
+
 
 def get_interaction_function_schemas():
     """OpenAI legacy-format function schemas for the interactive tools.
@@ -239,10 +258,6 @@ def build_ack_instruction(pending):
             f"them to react to this message with the {CONFIRM_EMOJI} emoji to confirm before you do it. "
             f"You MUST include the {CONFIRM_EMOJI} emoji in your reply. Keep it to one or two sentences."
         )
-        if pending["type"] == "schedule_message":
-            instruction += (
-                " Also briefly note that the reminder only holds as long as you stay online."
-            )
         return instruction
 
     # Short scheduled reminder — auto-scheduled, no confirmation needed.
