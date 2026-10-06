@@ -103,7 +103,11 @@ def extract_url_from_text(text: str) -> str | None:
 
 def normalize_url(url: str) -> str:
     """Convert bot embed-fix proxy domains back to originals that yt-dlp understands."""
-    url = url.strip()
+    # Unwrap Discord's <no-embed> brackets and pull the link out of any surrounding text
+    url = url.strip().strip("<>")
+    url = extract_url_from_text(url) or url
+    if not re.match(r'https?://', url, re.IGNORECASE):
+        url = f"https://{url}"
     if "fixupx.com" in url:
         return re.sub(r'fixupx\.com', 'x.com', url, flags=re.IGNORECASE)
     if "tnktok.com" in url:
@@ -162,6 +166,10 @@ def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
 
 def _classify_ydl_error(msg: str) -> VideoDownloadError:
     lower = msg.lower()
+    if "is not a valid url" in lower or "unsupported url" in lower:
+        return VideoDownloadError(
+            "That doesn't look like a valid video link — paste the full post URL.", "invalid_url",
+        )
     if any(marker in lower for marker in (
         "rate-limit", "rate limit", "too many requests", "login required",
         "login_required", "log in", "sign in", "registered users", "login page",
