@@ -7,6 +7,7 @@ from typing import Literal
 from openai import AsyncOpenAI
 
 from utils.integrations.video import (
+    VideoDownloadError,
     download_audio, download_video, download_instagram_video, download_attachment,
     transcribe_audio, summarize_transcript,
     extract_frames, extract_url_from_text, normalize_url, extract_audio_track,
@@ -146,6 +147,8 @@ async def _run_tldr(
                 else:
                     media_path, metadata = await download_video(url)
             except ValueError as dl_err:
+                if isinstance(dl_err, VideoDownloadError) and not dl_err.retryable_with_audio:
+                    raise
                 print(f"[tldr] video download failed ({dl_err}), falling back to audio-only")
                 media_path = None
 
@@ -189,6 +192,8 @@ async def _run_tldr(
 
                     await on_step("Transcribing...")
                     transcript = await transcribe_audio(audio_path, openai_client)
+                except VideoDownloadError:
+                    raise
                 except Exception as e:
                     raise ValueError(f"Could not transcribe video: {e}") from None
                 finally:

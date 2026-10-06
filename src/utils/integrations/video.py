@@ -4,9 +4,79 @@ import uuid
 import asyncio
 import base64
 import tempfile
+from contextlib import contextmanager
+from http.cookiejar import MozillaCookieJar
+from urllib.parse import urlsplit
 from openai import AsyncOpenAI
 
 MAX_DURATION_SECONDS = 1800   # 30-minute cap
+
+
+class VideoDownloadError(ValueError):
+    """A safe download-stage message with a machine-readable failure category."""
+
+    def __init__(self, message: str, category: str):
+        super().__init__(message)
+        self.category = category
+
+    @property
+    def retryable_with_audio(self) -> bool:
+        return self.category == "format_failure"
+
+
+class _DownloadLogger:
+    # yt-dlp can include URLs, cookies, and server responses in diagnostics.
+    # Log only our classified messages instead of forwarding those diagnostics.
+    def debug(self, message):
+        pass
+
+    def warning(self, message):
+        pass
+
+    def error(self, message):
+        pass
+
+
+@contextmanager
+def _instagram_cookie_options(url: str, options: dict):
+    opts = {**options, "logger": _DownloadLogger()}
+    host = (urlsplit(url).hostname or "").lower()
+    encoded = os.getenv("INSTAGRAM_COOKIES_B64", "").strip()
+    if not encoded or not (host == "instagram.com" or host.endswith(".instagram.com")):
+        yield opts
+        return
+
+    cookie_path = None
+    try:
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            if decoded.splitlines()[0] not in ("# Netscape HTTP Cookie File", "# HTTP Cookie File"):
+                raise ValueError("Invalid cookie header")
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", newline="\n",
+                prefix="abg_instagram_cookies_", suffix=".txt", delete=False,
+            ) as cookie_file:
+                cookie_path = cookie_file.name
+                cookie_file.write(decoded.replace("\r\n", "\n"))
+            jar = MozillaCookieJar(cookie_path)
+            jar.load(ignore_discard=True, ignore_expires=True)
+            for cookie in list(jar):
+                domain = cookie.domain.lstrip(".").lower()
+                if domain != "instagram.com" and not domain.endswith(".instagram.com"):
+                    jar.clear(cookie.domain, cookie.path, cookie.name)
+            if not list(jar):
+                raise ValueError("No Instagram cookies")
+            jar.save(ignore_discard=True, ignore_expires=True)
+        except Exception:
+            raise VideoDownloadError(
+                "Instagram login configuration is invalid. The bot operator must refresh INSTAGRAM_COOKIES_B64.",
+                "configuration_failure",
+            ) from None
+        opts["cookiefile"] = cookie_path
+        yield opts
+    finally:
+        if cookie_path and os.path.exists(cookie_path):
+            os.remove(cookie_path)
 
 # Matches original and bot-proxy video URLs in plain text
 _VIDEO_URL_RE = re.compile(
@@ -77,7 +147,8 @@ def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
         "quiet": True,
         "no_warnings": True,
         "match_filter": yt_dlp.utils.match_filter_func(
-            f"duration <= {MAX_DURATION_SECONDS}"
+            # "<=?" lets entries with unknown duration through — Instagram often omits it
+            f"duration <=? {MAX_DURATION_SECONDS}"
         ),
         "http_headers": {
             "User-Agent": (
@@ -89,40 +160,62 @@ def _build_ydl_opts(out_tmpl: str, fmt: str) -> dict:
     }
 
 
+def _classify_ydl_error(msg: str) -> VideoDownloadError:
+    lower = msg.lower()
+    if any(marker in lower for marker in (
+        "rate-limit", "rate limit", "too many requests", "login required",
+        "login_required", "log in", "sign in", "registered users", "login page",
+        "cookies", "bot detection", "captcha", "unexpected response",
+    )) or re.search(r"\b(403|429)\b", lower) or ("confirm" in lower and "bot" in lower):
+        return VideoDownloadError(
+            "Could not download video: the platform requires login or blocked/rate-limited the bot. "
+            "For Instagram, the bot operator may need to configure or refresh login cookies. "
+            "You can also use /tldr with a video attachment.", "access_blocked",
+        )
+    if "private" in lower:
+        return VideoDownloadError("That video is private or unavailable.", "unavailable")
+    if "match_filter" in lower or "duration" in lower:
+        return VideoDownloadError("Video is too long — max 30 minutes.", "unavailable")
+    if any(marker in lower for marker in ("not available", "unavailable", "removed")) or re.search(r"\b404\b", lower):
+        return VideoDownloadError("That video is unavailable or has been removed.", "unavailable")
+    return VideoDownloadError(
+        "Could not download video: the downloader could not retrieve a usable media format.",
+        "format_failure",
+    )
+
+
+def _raise_if_too_long(info: dict) -> None:
+    # match_filter skips over-long videos without raising, leaving no output file
+    if (info.get("duration") or 0) > MAX_DURATION_SECONDS:
+        raise VideoDownloadError("Video is too long — max 30 minutes.", "unavailable")
+
+
 def _translate_ydl_error(msg: str) -> str:
-    if "private" in msg.lower():
-        return "That video is private or unavailable."
-    if "match_filter" in msg.lower() or "duration" in msg.lower():
-        return "Video is too long — max 30 minutes."
-    if "not available" in msg.lower() or "removed" in msg.lower():
-        return "That video is unavailable or has been removed."
-    if "unexpected response" in msg.lower():
-        return "Could not download — the platform blocked the request (bot detection). Try again in a moment."
-    if "sign in" in msg.lower() or ("confirm" in msg.lower() and "bot" in msg.lower()):
-        return "Could not download — the platform blocked the request (bot detection)."
-    return f"Could not download video: {msg[:200]}"
+    return str(_classify_ydl_error(msg))
 
 
-async def _ydl_download(url: str, ydl_opts: dict) -> dict:
+async def _ydl_download(url: str, ydl_opts: dict, *, download: bool = True) -> dict:
     import yt_dlp
 
     def _run():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(url, download=True)
+        with _instagram_cookie_options(url, ydl_opts) as opts:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=download)
 
     loop = asyncio.get_event_loop()
     try:
         info = await loop.run_in_executor(None, _run)
-        print(f"[yt-dlp] ext={info.get('ext')} vcodec={info.get('vcodec')} acodec={info.get('acodec')} filesize={info.get('filesize')}")
+        print(f"[yt-dlp {yt_dlp.version.__version__}] extractor={info.get('extractor_key')} ext={info.get('ext')} vcodec={info.get('vcodec')} acodec={info.get('acodec')} filesize={info.get('filesize')}")
         return info
+    except VideoDownloadError:
+        raise
     except yt_dlp.utils.DownloadError as e:
-        raw = str(e)
-        print(f"[yt-dlp error] {raw[:500]}")
-        raise ValueError(_translate_ydl_error(raw))
-    except Exception as e:
-        raw = str(e)
-        print(f"[yt-dlp unexpected] {raw[:500]}")
-        raise ValueError(f"Unexpected download error: {raw[:200]}")
+        error = _classify_ydl_error(str(e))
+        print(f"[yt-dlp {yt_dlp.version.__version__} error] host={urlsplit(url).hostname} category={error.category}")
+        raise error from None
+    except Exception:
+        print(f"[yt-dlp {yt_dlp.version.__version__} unexpected] host={urlsplit(url).hostname} downloader operation failed")
+        raise VideoDownloadError("Could not download video: unexpected downloader failure.", "format_failure") from None
 
 
 async def download_audio(url: str) -> tuple[str, dict]:
@@ -139,6 +232,7 @@ async def download_audio(url: str) -> tuple[str, dict]:
     info = await _ydl_download(url, opts)
     out_path = _find_output_file(tmp_dir, temp_id, "abg_audio")
     if not out_path:
+        _raise_if_too_long(info)
         raise ValueError("Audio download failed — no output file was produced.")
     return out_path, _extract_metadata(info, url)
 
@@ -157,6 +251,7 @@ async def download_video(url: str) -> tuple[str, dict]:
     info     = await _ydl_download(url, opts)
     out_path = _find_output_file(tmp_dir, temp_id, "abg_video")
     if not out_path:
+        _raise_if_too_long(info)
         raise ValueError("Video download failed — no output file was produced.")
     return out_path, _extract_metadata(info, url)
 
@@ -238,25 +333,21 @@ async def download_instagram_video(url: str) -> tuple[str, dict]:
     Image slides download as jpg/png which _find_output_file doesn't match (it only
     looks for video extensions), so they're naturally skipped.
     """
-    import yt_dlp
-
     _headers = _build_ydl_opts("", "")["http_headers"]
 
-    def _count_entries():
-        opts = {
+    opts = {
             "noplaylist": False,
             "extract_flat": True,
             "quiet": True,
             "no_warnings": True,
             "http_headers": _headers,
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=False)
+    }
 
-    loop = asyncio.get_event_loop()
     try:
-        peek = await loop.run_in_executor(None, _count_entries)
-    except Exception:
+        peek = await _ydl_download(url, opts, download=False)
+    except VideoDownloadError as error:
+        if not error.retryable_with_audio:
+            raise
         return await download_video(url)
 
     entries = peek.get("entries")
@@ -293,6 +384,8 @@ async def download_instagram_video(url: str) -> tuple[str, dict]:
         try:
             item_info = await _ydl_download(url, opts)
         except ValueError as e:
+            if isinstance(e, VideoDownloadError) and not e.retryable_with_audio:
+                raise
             print(f"[instagram] slide {i} skipped: {e}")
             continue
 

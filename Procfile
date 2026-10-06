@@ -1,1 +1,1 @@
-worker: playwright install && python src/bot.py
+worker: pip install -U --quiet yt-dlp && playwright install && python src/bot.py
