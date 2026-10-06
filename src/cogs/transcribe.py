@@ -12,6 +12,9 @@ from utils.integrations.video import (
     transcribe_audio, summarize_transcript,
     extract_frames, extract_url_from_text, normalize_url, extract_audio_track,
 )
+from utils.integrations.youtube import (
+    extract_youtube_id, get_youtube_metadata, transcribe_youtube, youtube_max_seconds,
+)
 
 # Platforms where we download full video and extract frames for visual context
 _SHORT_FORM_PLATFORMS = {"TikTok", "Instagram", "Twitter/X"}
@@ -70,12 +73,13 @@ def _build_tldr_embed(
     transcript: str,
     include_transcript: bool,
     used_vision: bool,
+    src_label: str | None = None,
 ) -> tuple[discord.Embed, list[discord.File]]:
     title       = (metadata.get("title") or "Video Summary")[:200]
     dur_str     = _fmt_duration(metadata.get("duration", 0))
     icon        = "📋" if mode == "brief" else "📄"
     mode_label  = "Brief" if mode == "brief" else "Detailed"
-    src_label   = "Whisper + Vision" if used_vision else "Whisper"
+    src_label   = src_label or ("Whisper + Vision" if used_vision else "Whisper")
 
     emb = discord.Embed(
         title=f"{icon} {title}",
@@ -130,10 +134,21 @@ async def _run_tldr(
     media_path = None
     frames: list[str] = []
     used_vision = False
+    src_label = None
 
     try:
         if platform == "YouTube":
-            raise ValueError("YouTube isn't supported — try TikTok, Instagram, Twitter/X, or Reddit instead.")
+            video_id = extract_youtube_id(url)
+            if not video_id:
+                raise ValueError("Couldn't find a video ID in that YouTube link.")
+            await on_step("Fetching YouTube video info...")
+            metadata = await get_youtube_metadata(video_id)
+            max_seconds = youtube_max_seconds()
+            if (metadata.get("duration") or 0) > max_seconds:
+                raise ValueError(f"Video is too long — max {max_seconds // 60} minutes for YouTube.")
+            await on_step("Transcribing with Gemini... (long videos can take a minute)")
+            transcript = await transcribe_youtube(video_id)
+            src_label = "Gemini"
 
         elif platform in _SHORT_FORM_PLATFORMS:
             await on_step(f"Downloading {platform} video...")
@@ -217,7 +232,7 @@ async def _run_tldr(
 
         emb, files = _build_tldr_embed(
             summary, metadata, mode, platform,
-            transcript, include_transcript, used_vision,
+            transcript, include_transcript, used_vision, src_label,
         )
         return emb, files, transcript, metadata, summary
 
@@ -330,7 +345,7 @@ class Transcribe(commands.Cog):
 
     @app_commands.command(
         name="tldr",
-        description="Transcribe and summarize a video from TikTok, Twitter/X, Instagram, Reddit, or an uploaded file.",
+        description="Transcribe and summarize a video from YouTube, TikTok, Twitter/X, Instagram, Reddit, or a file.",
     )
     @app_commands.describe(
         url="Link to the video — leave blank to use the most recent video link in this channel",

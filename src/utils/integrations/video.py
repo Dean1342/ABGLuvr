@@ -431,6 +431,7 @@ async def download_attachment(url: str, filename: str) -> str:
 
 
 _WHISPER_MAX_BYTES = 25 * 1024 * 1024  # Whisper API hard limit
+_SUMMARY_TRANSCRIPT_CHARS = 60_000      # ~60 min of speech
 
 
 def _extract_audio_track_sync(video_path: str) -> str:
@@ -532,8 +533,8 @@ async def summarize_transcript(
         )
 
     title_hint       = f'Video title: "{metadata.get("title", "Unknown")}"'
-    transcript_body  = transcript[:12000]
-    if len(transcript) > 12000:
+    transcript_body  = transcript[:_SUMMARY_TRANSCRIPT_CHARS]
+    if len(transcript) > _SUMMARY_TRANSCRIPT_CHARS:
         transcript_body += "\n\n[Transcript truncated — only the first portion was summarized]"
 
     if has_frames:
