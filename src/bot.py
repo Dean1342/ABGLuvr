@@ -84,6 +84,12 @@ class MyBot(commands.Bot):
         except Exception as e:
             import traceback
             traceback.print_exc()
+        try:
+            from cogs.admin import Admin
+            await self.add_cog(Admin(self))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
 
 # Initialize bot
 bot = MyBot(command_prefix="/", intents=intents)
