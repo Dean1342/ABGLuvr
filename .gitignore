@@ -60,3 +60,5 @@ CLAUDE.md
 server_context.txt
 
 scripts/
+tests/
+ROADMAP.md

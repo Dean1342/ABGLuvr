@@ -192,7 +192,7 @@ def extract_text_from_csv(file_bytes):
                 csv_reader = csv.reader(StringIO(text_content))
                 text = ""
                 row_count = 0
-                max_rows = 1000  # Limit to prevent huge outputs
+                max_rows = 5000  # truncate_text caps the total size anyway
                 
                 for row in csv_reader:
                     if row_count >= max_rows:
@@ -256,8 +256,8 @@ async def process_file_attachment(attachment):
         return None
 
 
-def truncate_text(text, max_chars=10000):
-    """Truncate text to avoid token limits"""
+def truncate_text(text, max_chars=150_000):
+    """Truncate extracted file text (~40k tokens: a long PDF, well inside the model's context)"""
     if len(text) <= max_chars:
         return text
     

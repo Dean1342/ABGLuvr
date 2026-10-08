@@ -16,6 +16,12 @@ async def get_client() -> AsyncClient:
     return _client
 
 
+def parse_timestamp(value) -> datetime.datetime:
+    # Supabase timestamptz string -> aware UTC datetime.
+    dt = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
+
+
 # --- car_profiles ---
 
 async def get_profile(user_id: int) -> dict | None:
@@ -176,10 +182,13 @@ async def delete_reminder(reminder_id: str) -> None:
 #     updated_at timestamptz default now(),
 #     primary key (user_id, channel_id)
 #   );
+# Round 3 added the /model reset + persona-switch cutoff:
+#   alter table user_settings add column context_reset_at timestamptz;
 
 async def get_all_user_settings() -> list[dict]:
     client = await get_client()
-    result = await client.table("user_settings").select("user_id,channel_id,persona,model").execute()
+    # select * so restoring still works before the context_reset_at column exists
+    result = await client.table("user_settings").select("*").execute()
     return result.data or []
 
 
@@ -209,3 +218,105 @@ async def upsert_user_setting(user_id: int, channel_id: int, **fields) -> None:
 async def insert_ai_log(log: dict) -> None:
     client = await get_client()
     await client.table("ai_logs").insert({"request_id": log.get("request_id"), "data": log}).execute()
+
+
+# --- channel_summaries ---
+# Rolling summary of each channel's older conversation (utils/conversation/memory.py).
+# Table DDL (run once in Supabase):
+#   create table channel_summaries (
+#     channel_id       bigint primary key,
+#     guild_id         bigint,
+#     summary          text        not null,
+#     up_to_message_id bigint      not null,
+#     up_to_at         timestamptz not null,
+#     updated_at       timestamptz default now()
+#   );
+
+async def get_channel_summary(channel_id: int) -> dict | None:
+    client = await get_client()
+    result = await client.table("channel_summaries").select("*").eq("channel_id", channel_id).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+async def upsert_channel_summary(data: dict) -> None:
+    client = await get_client()
+    await client.table("channel_summaries").upsert(
+        {**data, "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+        on_conflict="channel_id"
+    ).execute()
+
+
+# --- remembered_facts ---
+# Facts people explicitly asked the bot to remember (utils/conversation/memory.py).
+# scope: 'user' (about everyone in subject_ids), 'channel' (only in channel_id) or 'server'.
+# Table DDL (run once in Supabase):
+#   create table remembered_facts (
+#     id                bigint generated always as identity primary key,
+#     guild_id          bigint not null,
+#     scope             text   not null check (scope in ('user', 'channel', 'server')),
+#     channel_id        bigint,
+#     subject_ids       bigint[],
+#     fact              text   not null,
+#     added_by          bigint,
+#     source_message_id bigint,
+#     created_at        timestamptz default now()
+#   );
+#   create index remembered_facts_guild on remembered_facts (guild_id);
+# Before multi-person facts, the table had `subject_id bigint`; migrate with:
+#   alter table remembered_facts add column subject_ids bigint[];
+#   update remembered_facts set subject_ids = array[subject_id] where subject_id is not null;
+#   alter table remembered_facts drop column subject_id;
+
+async def get_facts(guild_id: int) -> list[dict]:
+    client = await get_client()
+    result = await client.table("remembered_facts").select("*").eq("guild_id", guild_id).order("id").execute()
+    return result.data or []
+
+
+async def insert_fact(data: dict) -> dict | None:
+    client = await get_client()
+    result = await client.table("remembered_facts").insert(data).execute()
+    return result.data[0] if result.data else None
+
+
+async def delete_facts(guild_id: int, fact_ids: list[int]) -> list[int]:
+    client = await get_client()
+    result = (
+        await client.table("remembered_facts")
+        .delete()
+        .eq("guild_id", guild_id)
+        .in_("id", fact_ids)
+        .execute()
+    )
+    return [row["id"] for row in result.data or []]
+
+
+# --- tldr_results ---
+# TLDR transcripts/summaries keyed by the embed's message id, so replies to a TLDR keep
+# their video context across restarts (cogs/transcribe.py). Pruned after 30 days.
+# Table DDL (run once in Supabase):
+#   create table tldr_results (
+#     message_id bigint primary key,
+#     title      text,
+#     summary    text,
+#     transcript text,
+#     created_at timestamptz default now()
+#   );
+
+async def upsert_tldr_result(message_id: int, title: str, summary: str, transcript: str) -> None:
+    client = await get_client()
+    await client.table("tldr_results").upsert(
+        {"message_id": message_id, "title": title, "summary": summary, "transcript": transcript},
+        on_conflict="message_id"
+    ).execute()
+
+
+async def get_tldr_result(message_id: int) -> dict | None:
+    client = await get_client()
+    result = await client.table("tldr_results").select("*").eq("message_id", message_id).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+async def prune_tldr_results(older_than: datetime.datetime) -> None:
+    client = await get_client()
+    await client.table("tldr_results").delete().lt("created_at", older_than.isoformat()).execute()

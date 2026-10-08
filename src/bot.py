@@ -11,7 +11,14 @@ from openai import AsyncOpenAI
 # Load environment variables early so imports that rely on them don't fail
 # Specifically target the .env file in the parent directory (root of the workspace)
 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
-load_dotenv(env_path)
+# override: .env wins over variables already in the shell. VS Code copies .env into each
+# terminal when it opens, so a stale copy (e.g. a token reset since) would otherwise win.
+# Heroku has no .env file, so its config vars are unaffected.
+load_dotenv(env_path, override=True)
+
+# Log lines include user text (any language); Windows consoles default to cp1252 and
+# would raise UnicodeEncodeError mid-reply.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # Add src directory to Python path so imports work correctly
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -19,10 +26,11 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 from utils.conversation.context import user_personas, user_models, MODELS, resolve_model_name
-from utils.conversation.channel_context import record_message, update_message, forget_message, build_context
+from utils.conversation.channel_context import record_message, update_message, forget_message, build_context, recent_before
+from utils.conversation import memory
 from utils.ai.multimodal import build_multimodal_content
 from utils.core.text_formatting import fix_social_media_links, contains_social_media_links, contains_user_mentions, remove_mentions_from_text
-from utils.ai.message_processing import build_user_message_content, send_response
+from utils.ai.message_processing import build_user_message_content, send_response, resolve_discord_user_id
 from utils.ai.prompts import build_instructions, resolve_persona
 from utils.ai.agent import run_agent
 from utils.ai.tools import ToolContext
@@ -91,6 +99,12 @@ class MyBot(commands.Bot):
         except Exception as e:
             import traceback
             traceback.print_exc()
+        try:
+            from cogs.memory import Memory
+            await self.add_cog(Memory(self))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
 
 # Initialize bot
 bot = MyBot(command_prefix="/", intents=intents)
@@ -128,24 +142,47 @@ async def on_ready():
     except Exception as e:
         import traceback
         traceback.print_exc()
+    # Drop stored TLDR transcripts older than 30 days.
+    try:
+        from cogs.transcribe import prune_stored_tldrs
+        await prune_stored_tldrs()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
 
-def _tldr_context(message):
-    # When a message replies to a TLDR embed, hand the agent that video's transcript.
-    ref = message.reference
-    if not ref or not ref.message_id:
-        return None
-    from cogs.transcribe import tldr_results
-    result = tldr_results.get(ref.message_id)
+TLDR_NEARBY_MESSAGES = 5
+TLDR_CONTEXT_CHARS = 60_000  # same span the TLDR summary was written from (~60 min of speech)
+
+
+async def _tldr_context(message):
+    # Hand the agent a video's transcript when the message replies to a TLDR embed, or
+    # when a TLDR was posted just before what it replies to (or just before it), as in
+    # TLDR -> "lol that's funny" -> reply "thoughts?".
+    from cogs.transcribe import get_tldr_result
+    ref_id = message.reference.message_id if message.reference else None
+    result = await get_tldr_result(ref_id) if ref_id else None
+    direct = result is not None
+    if not direct:
+        for snap in recent_before(message.channel.id, ref_id or message.id, TLDR_NEARBY_MESSAGES):
+            if snap["is_self"] and snap["has_embed"]:
+                result = await get_tldr_result(snap["id"])
+                if result:
+                    break
     if not result:
         return None
     title = result["metadata"].get("title", "Unknown")
+    if direct:
+        framing = ("You posted a TLDR of this video, and the next user message is a direct reply to it, "
+                   "so treat the video as the obvious subject.")
+    else:
+        framing = ("You posted a TLDR of this video a few messages ago. Unless the conversation has clearly "
+                   "moved on, it's probably what they're reacting to.")
     return {
         "role": "system",
         "content": (
-            "You posted a TLDR of this video, and the next user message is a direct reply to it, "
-            "so treat the video as the obvious subject.\n"
+            f"{framing}\n"
             f"Title: \"{title}\"\nYour summary: {result['summary']}\n"
-            f"Transcript:\n{result['transcript'][:8000]}"
+            f"Transcript:\n{result['transcript'][:TLDR_CONTEXT_CHARS]}"
         ),
     }
 
@@ -306,22 +343,35 @@ async def on_message(message: discord.Message):
         await send_response(message, answer)
         return
 
-    # Recent channel messages (everyone's, oldest first), plus video context for TLDR replies
+    client = get_openai_client()
+
+    # Long-term memory (remembered facts + older-conversation summary), then recent channel
+    # messages (everyone's, oldest first), plus video context for TLDR replies
     history = await build_context(message, bot.user.id, user_id)
     try:
-        tldr = _tldr_context(message)
+        note = await memory.build_memory_note(message, bot.user.id, user_id, history, client)
+        if note:
+            history.insert(0, note)
+    except Exception as e:
+        print(f"[memory] couldn't build memory note: {type(e).__name__}: {e}")
+    try:
+        tldr = await _tldr_context(message)
         if tldr:
             history.append(tldr)
     except Exception:
         pass  # never let this block the normal message pipeline
 
-    client = get_openai_client()
     model = MODELS[model_name]
     ctx = ToolContext(
         client=client,
         model_id=model["id"],
         instructions=instructions,
         reasoning=model["api"]["reasoning"],
+        guild_id=message.guild.id,
+        channel_id=channel_id,
+        requester_id=user_id,
+        message_id=message.id,
+        resolve_user=lambda name: resolve_discord_user_id(name, message.guild),
     )
     log_meta = {
         "user_id": user_id,
@@ -345,6 +395,12 @@ async def on_message(message: discord.Message):
     # For ping/schedule acks, suppress mentions so the target isn't pinged (spoiled)
     # by the acknowledgement — only the actual action should ping them.
     ack_message = await send_response(message, answer, suppress_mentions=bool(pending_actions))
+
+    # Fold messages that slid out of the window into the channel summary (background).
+    try:
+        await memory.refresh_after_reply(message, bot.user.id, client)
+    except Exception as e:
+        print(f"[memory] couldn't schedule summary refresh: {type(e).__name__}: {e}")
 
     # Confirmation/execution runs OUTSIDE the typing() block so the reaction wait doesn't hang it.
     for pending in pending_actions:

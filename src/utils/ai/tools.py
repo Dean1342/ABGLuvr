@@ -7,12 +7,15 @@
 # Tools that need Discord objects (pinging) don't execute here: they queue a normalized
 # pending action on the ToolContext, which bot.py's on_message runs after the reply is
 # sent (confirmation gate, scheduling, etc. live in utils/interactions/actions.py).
+# Memory tools only read/write the fact store, so they run inline; the ids and member
+# resolver they need come in on the ToolContext.
 import json
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from openai import AsyncOpenAI
 
+from utils.conversation import memory
 from utils.integrations.currency import convert_currency, format_conversion
 from utils.interactions.actions import (
     get_interaction_function_schemas, build_pending_action, build_ack_instruction,
@@ -27,6 +30,12 @@ class ToolContext:
     instructions: str
     reasoning: bool = False
     pending_actions: list = field(default_factory=list)
+    # Where the message came from (None outside Discord, e.g. some evals).
+    guild_id: int | None = None
+    channel_id: int | None = None
+    requester_id: int | None = None
+    message_id: int | None = None
+    resolve_user: Callable[[str], int | None] | None = None  # name or mention -> member id
 
 
 @dataclass
@@ -124,7 +133,131 @@ PING_USER = Tool(
 )
 
 
-TOOLS = {tool.name: tool for tool in (CONVERT_CURRENCY, PING_USER)}
+# --- remember_fact / forget_fact ---
+
+_UNAVAILABLE = "Error: memory storage is unavailable right now, so nothing was saved or deleted. Say so."
+
+
+async def _remember_fact(args, ctx):
+    if ctx.guild_id is None:
+        return _UNAVAILABLE
+    scope = args.get("scope") or "user"
+    subject_ids = []
+    if scope == "user":
+        about = args.get("about") or ["me"]
+        for name in [about] if isinstance(about, str) else about:
+            name = str(name).strip()
+            if name.lower() in ("me", "myself", "i", "sender"):
+                subject_ids.append(ctx.requester_id)
+                continue
+            user_id = ctx.resolve_user(name) if ctx.resolve_user else None
+            if user_id is None:
+                return f"Error: couldn't find a server member matching '{name}'. Ask who they mean."
+            subject_ids.append(user_id)
+    try:
+        row, removed, created = await memory.remember(
+            ctx.guild_id, scope, args.get("fact"),
+            channel_id=ctx.channel_id, subject_ids=subject_ids, added_by=ctx.requester_id,
+            source_message_id=ctx.message_id, replaces=args.get("replaces") or [],
+        )
+    except memory.MemoryUnavailable:
+        return _UNAVAILABLE
+    except ValueError as e:
+        return f"Error: {e}."
+    if not created:
+        result = f"Already saved as #{row['id']}; nothing new was stored."
+    else:
+        result = f"Saved as #{row['id']} ({scope})."
+    if removed:
+        result += " Replaced " + ", ".join(f"#{i}" for i in removed) + "."
+    return result + " Confirm briefly in your own voice; don't read the fact back word for word."
+
+
+REMEMBER_FACT = Tool(
+    name="remember_fact",
+    description=(
+        "Saves a fact to your long-term memory so you still know it in later conversations. "
+        "Only call it when someone explicitly asks you to remember, note, or save something "
+        "('remember that...', 'don't forget...', 'note that I...'). Never call it on your own just "
+        "because someone shared information. Facts already in your memory note are saved; never "
+        "save them again.\n\n"
+        "Write the fact as a short standalone statement that names who it's about "
+        "(\"Dean's M4 is getting downpipes installed Thursday\"), not with 'I' or 'my'. If it updates "
+        "or contradicts a fact already in your memory, pass that fact's id in `replaces` so the old "
+        "one is removed."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "fact": {"type": "string", "description": "The fact, as one short standalone sentence"},
+            "scope": {
+                "type": "string",
+                "enum": list(memory.SCOPES),
+                "description": "user: about one or more specific people. "
+                               "server: about the whole group, not anyone in particular (meetups, "
+                               "traditions, server rules). channel: only matters in this channel.",
+            },
+            "about": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "For scope=user: everyone the fact involves. 'me' for the sender, otherwise "
+                               "their name or mention (e.g. 'X owes me $20' -> ['me', 'X']).",
+            },
+            "replaces": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "Ids of remembered facts this one supersedes",
+            },
+        },
+        "required": ["fact", "scope"],
+    },
+    handler=_remember_fact,
+)
+
+
+async def _forget_fact(args, ctx):
+    if ctx.guild_id is None:
+        return _UNAVAILABLE
+    ids = [i for i in args.get("fact_ids") or [] if isinstance(i, int)]
+    if not ids:
+        return "Error: pass the [#id] numbers of the facts to forget."
+    try:
+        texts = {f["id"]: f["fact"] for f in await memory.get_facts(ctx.guild_id) or []}
+        deleted = await memory.forget(ctx.guild_id, ids)
+    except memory.MemoryUnavailable:
+        return _UNAVAILABLE
+    missing = sorted(set(ids) - set(deleted))
+    if deleted:
+        print(f"[memory] guild {ctx.guild_id}: user {ctx.requester_id} forgot {deleted}")
+    parts = []
+    if deleted:
+        # Spelled out so a wrong deletion is visible in the reply and easy to undo.
+        parts.append("Deleted: " + "; ".join(f"#{i} \"{texts.get(i, '?')}\"" for i in deleted) + ". "
+                     "Say briefly which fact(s) you forgot so the user can catch a mistake.")
+    if missing:
+        parts.append("No remembered fact with id " + ", ".join(f"#{i}" for i in missing) + ".")
+    return " ".join(parts)
+
+
+FORGET_FACT = Tool(
+    name="forget_fact",
+    description=(
+        "Deletes facts from your long-term memory by id (the [#id] shown in your memory). Call it "
+        "when someone asks you to forget something or says a remembered fact is wrong and doesn't give "
+        "a replacement. If it's unclear which fact they mean, ask instead of guessing."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "fact_ids": {"type": "array", "items": {"type": "integer"}, "description": "Ids to delete"},
+        },
+        "required": ["fact_ids"],
+    },
+    handler=_forget_fact,
+)
+
+
+TOOLS = {tool.name: tool for tool in (CONVERT_CURRENCY, PING_USER, REMEMBER_FACT, FORGET_FACT)}
 
 
 def function_specs() -> list[dict]:

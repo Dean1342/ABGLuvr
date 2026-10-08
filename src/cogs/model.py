@@ -3,7 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 from utils.conversation.context import user_models, MODELS, resolve_model_name
 from utils.conversation.channel_context import reset_context
-from utils.conversation.settings import save_user_setting
+from utils.conversation.settings import save_user_setting, save_context_reset
 
 class Model(commands.GroupCog, name="model"):
     # Handles model switching commands
@@ -90,7 +90,7 @@ class Model(commands.GroupCog, name="model"):
     async def reset(self, interaction: discord.Interaction):
         # Context comes from the channel itself, so "reset" means: when answering this
         # user here, ignore everything said before now.
-        reset_context(interaction.user.id, interaction.channel_id)
+        reset_at = reset_context(interaction.user.id, interaction.channel_id)
         embed = discord.Embed(
             title="🔄 Conversation Reset",
             description="Starting fresh! When you talk to me in this channel, I'll ignore everything said before now.",
@@ -98,11 +98,12 @@ class Model(commands.GroupCog, name="model"):
         )
         embed.add_field(
             name="What was kept:",
-            value="• Your selected persona\n• Your selected AI model",
+            value="• Your selected persona\n• Your selected AI model\n• Facts you asked me to remember (see `/memory show`)",
             inline=False
         )
-        
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        await save_context_reset(interaction.user.id, interaction.channel_id, reset_at)
 
 async def setup(bot):
     await bot.add_cog(Model(bot))

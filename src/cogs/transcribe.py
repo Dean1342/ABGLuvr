@@ -1,3 +1,5 @@
+import asyncio
+import datetime
 import io
 import os
 import discord
@@ -12,6 +14,7 @@ from utils.integrations.video import (
     transcribe_audio, summarize_transcript,
     extract_frames, extract_url_from_text, normalize_url, extract_audio_track,
 )
+from utils.integrations import supabase_client as db
 from utils.integrations.youtube import (
     extract_youtube_id, get_youtube_metadata, transcribe_youtube, youtube_max_seconds,
 )
@@ -25,16 +28,58 @@ _WHISPER_SIZE_LIMIT = 25 * 1024 * 1024  # 25 MB — Whisper API hard limit
 # must have its audio track extracted/transcoded to AAC/mp4 first via PyAV.
 _WHISPER_SUPPORTED_EXTS = {"flac", "m4a", "mp3", "mp4", "mpeg", "mpga", "oga", "ogg", "wav", "webm"}
 
-# TLDR result cache keyed by Discord message ID — used for video conversation context
+# TLDR result cache keyed by Discord message ID — used for video conversation context.
+# Written through to Supabase tldr_results so replies to a TLDR keep working after a
+# restart; the DB copy keeps only what bot.py's _tldr_context uses.
 tldr_results: dict[int, dict] = {}
 _TLDR_MAX_CACHE = 100
+_TLDR_STORED_TRANSCRIPT_CHARS = 60_000  # matches what follow-ups can use (bot.TLDR_CONTEXT_CHARS)
+_TLDR_RETENTION = datetime.timedelta(days=30)
+_background_tasks = set()  # strong refs so fire-and-forget saves aren't GC'd mid-flight
 
 
-def _store_tldr_result(msg_id: int, transcript: str, metadata: dict, summary: str) -> None:
+def _cache_tldr_result(msg_id: int, result: dict) -> None:
     if len(tldr_results) >= _TLDR_MAX_CACHE:
         oldest = next(iter(tldr_results))
         del tldr_results[oldest]
-    tldr_results[msg_id] = {"transcript": transcript, "metadata": metadata, "summary": summary}
+    tldr_results[msg_id] = result
+
+
+async def _save_tldr_result(msg_id: int, transcript: str, metadata: dict, summary: str) -> None:
+    try:
+        await db.upsert_tldr_result(msg_id, metadata.get("title") or "Unknown", summary,
+                                    transcript[:_TLDR_STORED_TRANSCRIPT_CHARS])
+    except Exception as e:
+        print(f"[tldr] couldn't save result {msg_id}: {type(e).__name__}: {e}")
+
+
+def _store_tldr_result(msg_id: int, transcript: str, metadata: dict, summary: str) -> None:
+    _cache_tldr_result(msg_id, {"transcript": transcript, "metadata": metadata, "summary": summary})
+    task = asyncio.create_task(_save_tldr_result(msg_id, transcript, metadata, summary))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def get_tldr_result(msg_id: int) -> dict | None:
+    if msg_id in tldr_results:
+        return tldr_results[msg_id]
+    try:
+        row = await db.get_tldr_result(msg_id)
+    except Exception as e:
+        print(f"[tldr] couldn't load result {msg_id}: {type(e).__name__}: {e}")
+        return None
+    if not row:
+        return None
+    result = {"transcript": row["transcript"] or "", "metadata": {"title": row["title"]}, "summary": row["summary"] or ""}
+    _cache_tldr_result(msg_id, result)
+    return result
+
+
+async def prune_stored_tldrs() -> None:
+    try:
+        await db.prune_tldr_results(datetime.datetime.now(datetime.timezone.utc) - _TLDR_RETENTION)
+    except Exception as e:
+        print(f"[tldr] couldn't prune stored results: {type(e).__name__}: {e}")
 
 
 def _detect_platform(url: str) -> str:

@@ -3,7 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 from utils.conversation.context import user_personas
 from utils.conversation.channel_context import reset_context
-from utils.conversation.settings import save_user_setting
+from utils.conversation.settings import save_user_setting, save_context_reset
 from utils.ai.prompts import enabled_personas, resolve_persona
 
 class Persona(commands.GroupCog, name="persona"):
@@ -34,9 +34,10 @@ class Persona(commands.GroupCog, name="persona"):
         key = (interaction.user.id, interaction.channel_id)
         user_personas[key] = match
         # Start fresh so replies in the old persona's voice don't bleed into the new one.
-        reset_context(interaction.user.id, interaction.channel_id)
+        reset_at = reset_context(interaction.user.id, interaction.channel_id)
         await interaction.response.send_message(f"Persona changed to **{match}**.")
         await save_user_setting(interaction.user.id, interaction.channel_id, persona=match)
+        await save_context_reset(interaction.user.id, interaction.channel_id, reset_at)
 
 async def setup(bot):
     await bot.add_cog(Persona(bot))

@@ -158,13 +158,19 @@ def _truncate(value, limit=200):
     return value if len(value) <= limit else value[:limit] + "…"
 
 
-async def _create(client, model_id, instructions, input_items, opts, tools_enabled):
+async def _create(client, model_id, instructions, input_items, opts, tools_enabled, cache_key=None):
     kwargs = {
         "model": model_id,
         "instructions": instructions,
         "input": input_items,
         "store": False,
     }
+    if cache_key:
+        # Routes a channel's turns to the same prompt cache. channel_context keeps the
+        # window's start fixed between trims, so consecutive turns share almost their
+        # whole input and it's billed at the cached rate. 24h retention costs nothing extra.
+        kwargs["prompt_cache_key"] = cache_key
+        kwargs["prompt_cache_retention"] = "24h"
     tools = function_specs() + ([{"type": "web_search"}] if opts["web_search"] else [])
     kwargs["tools"] = tools
     kwargs["parallel_tool_calls"] = True
@@ -252,7 +258,8 @@ async def run_agent(client, model_name, instructions, history, user_content, ctx
             tools_enabled = round_num < MAX_TOOL_ROUNDS
             while True:
                 try:
-                    response = await _create(client, model_id, instructions, input_items, opts, tools_enabled)
+                    response = await _create(client, model_id, instructions, input_items, opts, tools_enabled,
+                                             f"abg-{ctx.channel_id}" if ctx.channel_id else None)
                     break
                 except openai.BadRequestError as e:
                     feature = _unsupported_feature(e, opts) if round_num == 0 else None
