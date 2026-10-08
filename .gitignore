@@ -55,3 +55,8 @@ src/utils/integrations/spotify/spotify_users.json
 Logs/
 CLAUDE.md
 .claude/
+
+# Hand-written server facts for the AI prompt (optional, see src/utils/ai/prompts.py)
+server_context.txt
+
+scripts/

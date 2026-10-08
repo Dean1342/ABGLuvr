@@ -1,8 +1,9 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from utils.conversation.context import user_models, user_conversations, GLOBAL_BEHAVIOR, MODELS
-from utils.conversation.persona_loaders import load_jagbir_persona, load_lemon_persona, load_epoe_persona
+from utils.conversation.context import user_models, MODELS, resolve_model_name
+from utils.conversation.channel_context import reset_context
+from utils.conversation.settings import save_user_setting
 
 class Model(commands.GroupCog, name="model"):
     # Handles model switching commands
@@ -13,11 +14,11 @@ class Model(commands.GroupCog, name="model"):
     async def selected(self, interaction: discord.Interaction):
         # Show the user's current model
         key = (interaction.user.id, interaction.channel_id)
-        model = user_models.get(key, "GPT-5.4 Mini")
+        model = resolve_model_name(user_models.get(key))
         model_info = MODELS[model]
         
         # Create color based on model type
-        if "GPT-5" in model:
+        if not model.startswith("GPT-4.1"):
             color = discord.Color.from_rgb(255, 134, 159)  # Pink gradient color from screenshot
         else:  # GPT-4.1
             color = discord.Color.from_rgb(134, 159, 255)  # Blue gradient color from screenshot
@@ -66,7 +67,7 @@ class Model(commands.GroupCog, name="model"):
         model_info = MODELS[model]
         
         # Create color based on model type
-        if "GPT-5" in model:
+        if not model.startswith("GPT-4.1"):
             color = discord.Color.from_rgb(255, 134, 159)  # Pink gradient color
         else:  # GPT-4.1
             color = discord.Color.from_rgb(134, 159, 255)  # Blue gradient color
@@ -83,35 +84,23 @@ class Model(commands.GroupCog, name="model"):
         embed.add_field(name="Model ID", value=f"`{model_info['id']}`", inline=False)
         
         await interaction.response.send_message(embed=embed)
+        await save_user_setting(interaction.user.id, interaction.channel_id, model=model)
 
     @app_commands.command(name="reset", description="Reset your conversation history to start fresh")
     async def reset(self, interaction: discord.Interaction):
-        # Reset the user's conversation history
-        key = (interaction.user.id, interaction.channel_id)
-        
-        if key in user_conversations:
-            del user_conversations[key]
-            embed = discord.Embed(
-                title="🔄 Conversation Reset",
-                description="Your conversation history has been cleared. Starting fresh!",
-                color=discord.Color.green()
-            )
-            embed.add_field(
-                name="What was reset:",
-                value="• All previous messages\n• Conversation context\n• Message history",
-                inline=False
-            )
-            embed.add_field(
-                name="What was kept:",
-                value="• Your selected persona\n• Your selected AI model\n• Your preferences",
-                inline=False
-            )
-        else:
-            embed = discord.Embed(
-                title="🔄 Conversation Reset",
-                description="You don't have any conversation history to reset in this channel.",
-                color=discord.Color.blue()
-            )
+        # Context comes from the channel itself, so "reset" means: when answering this
+        # user here, ignore everything said before now.
+        reset_context(interaction.user.id, interaction.channel_id)
+        embed = discord.Embed(
+            title="🔄 Conversation Reset",
+            description="Starting fresh! When you talk to me in this channel, I'll ignore everything said before now.",
+            color=discord.Color.green()
+        )
+        embed.add_field(
+            name="What was kept:",
+            value="• Your selected persona\n• Your selected AI model",
+            inline=False
+        )
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

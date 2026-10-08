@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from http.cookiejar import MozillaCookieJar
 from urllib.parse import urlsplit
 from openai import AsyncOpenAI
+from utils.conversation.context import DEFAULT_MODEL_ID
 
 MAX_DURATION_SECONDS = 1800   # 30-minute cap
 
@@ -516,7 +517,7 @@ async def summarize_transcript(
             "Start with one sentence capturing the core topic, then use 3–5 concise bullet points. "
             "Be direct and skimmable."
         )
-        max_completion_tokens = 500
+        max_completion_tokens = 1500
     else:
         instruction = (
             "You are a helpful assistant that summarizes video content. "
@@ -524,7 +525,7 @@ async def summarize_transcript(
             "Write 2–3 short paragraphs covering the main topic, key points or arguments, "
             "and any notable details, quotes, or conclusions. Be thorough but clear."
         )
-        max_completion_tokens = 1000
+        max_completion_tokens = 2500
 
     if has_frames:
         instruction += (
@@ -555,8 +556,10 @@ async def summarize_transcript(
     ]
 
     resp = await openai_client.chat.completions.create(
-        model="gpt-5.4-mini-2026-03-17",
+        model=DEFAULT_MODEL_ID,
         messages=messages,
+        # Generous cap: reasoning tokens count toward it; length is set by the instruction
         max_completion_tokens=max_completion_tokens,
+        reasoning_effort="low",
     )
     return resp.choices[0].message.content.strip()

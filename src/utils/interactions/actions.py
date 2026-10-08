@@ -7,10 +7,10 @@
 # reminder, and a delayed spam burst — so the model can't "drop" the count when a
 # delay is also present (which happened when ping/schedule were separate tools).
 #
-# Because the tool-dispatch point (handle_openai_response) has no Discord context, the
-# tool does NOT execute there. It produces a normalized "pending action" dict returned
-# up to bot.py's on_message, which owns the Discord objects and performs
-# user-resolution, the ✅ confirmation gate, and execution/scheduling.
+# Because the agent loop (utils/ai/agent.py) has no Discord context, the tool does NOT
+# execute there. Its handler (utils/ai/tools.py) queues a normalized "pending action"
+# dict that bot.py's on_message picks up; on_message owns the Discord objects and
+# performs user-resolution, the ✅ confirmation gate, and execution/scheduling.
 #
 # Delayed actions are persisted to Supabase and rehydrated on startup, so they survive
 # restarts. Immediate actions run in-process.
@@ -42,8 +42,8 @@ _USER_ONLY_MENTIONS = discord.AllowedMentions(users=True, everyone=False, roles=
 # Raw-target patterns we refuse outright (mass-ping / role targets).
 _ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 
-# Appended to the system prompt on every turn (see bot.py) so the PRIMARY completion —
-# the one that decides whether to call the tool — is willing to. Without this the model
+# Included in the system instructions on every turn (see utils/ai/prompts.py) so the
+# model deciding whether to call the tool is willing to. Without this the model
 # tends to refuse ping/spam requests conversationally (moralizing about "harassment")
 # or demand an exact @mention instead of just calling the tool.
 PING_ACTIONS_INSTRUCTION = (
@@ -64,11 +64,11 @@ PING_ACTIONS_INSTRUCTION = (
 
 
 def get_interaction_function_schemas():
-    """OpenAI legacy-format function schema(s) for the interactive ping tool.
+    """Function schema(s) (name/description/parameters) for the interactive ping tool.
 
-    Kept separate so message_processing.get_function_schemas() can splice it into the
-    master tool list. The description is tightly scoped so the model only fires it on
-    explicit, unambiguous requests — not casual mentions of a user.
+    utils/ai/tools.py wraps these into the agent's tool registry. The description is
+    tightly scoped so the model only fires it on explicit, unambiguous requests — not
+    casual mentions of a user.
     """
     return [
         {
@@ -209,17 +209,19 @@ def _action_summary(pending):
 
 
 def build_ack_instruction(pending):
-    """System instruction handed to a second LLM call so the ack is in persona voice."""
+    """Tool-result instruction telling the model how to word its persona-voiced ack."""
     summary = _action_summary(pending)
 
     if pending["requires_confirmation"]:
+        # The "react ✅ to confirm" line is appended in code (confirmation_footer), so the
+        # model only has to acknowledge — and must not imply it's already done.
         return (
             _CONTEXT_PREAMBLE +
-            f"The user just asked you to {summary}. Do NOT claim you've done it yet — you will only "
-            f"carry it out once they confirm. Write a short reply IN YOUR CURRENT CHARACTER/PERSONA "
-            f"voice that: (1) acknowledges the request with your usual attitude, and (2) clearly tells "
-            f"them to react to this message with the {CONFIRM_EMOJI} emoji to confirm before you do it. "
-            f"You MUST include the {CONFIRM_EMOJI} emoji in your reply. Keep it to one or two sentences."
+            f"The user just asked you to {summary}. It is NOT set up yet: it only happens after they "
+            f"confirm. Write a short reply IN YOUR CURRENT CHARACTER/PERSONA voice acknowledging the "
+            f"request with your usual attitude. Do NOT say it's done, set, scheduled, or locked in, and "
+            f"don't explain how to confirm (a confirmation prompt is added below your reply "
+            f"automatically). One sentence."
         )
 
     # No confirmation needed (single ping, short/no delay) — it's already happening.
@@ -258,6 +260,13 @@ def build_delivery_instruction(pending):
         f"Exception: if the note is clearly an exact phrase the user wants relayed word-for-word, "
         f"output it verbatim."
     )
+
+
+def confirmation_footer(pending_actions):
+    """Deterministic confirm prompt appended under an ack when any action needs ✅."""
+    if not any(p.get("requires_confirmation") for p in pending_actions):
+        return ""
+    return f"\n-# React {CONFIRM_EMOJI} within {CONFIRM_TIMEOUT // 60} minutes to confirm"
 
 
 def _delivery_text(pending):

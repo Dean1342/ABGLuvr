@@ -12,6 +12,7 @@ import openpyxl
 from openai import AsyncOpenAI
 
 from utils.integrations import supabase_client as db
+from utils.conversation.context import DEFAULT_MODEL_ID
 from utils.ui.build_pagination import BuildPaginationView
 from utils.car_charts import charts
 
@@ -127,7 +128,7 @@ async def _detect_car_color(image_url: str) -> int | None:
     try:
         client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         resp = await client.chat.completions.create(
-            model=os.getenv('OPENAI_FINAL_MODEL', 'gpt-4.1-mini-2025-04-14'),
+            model=DEFAULT_MODEL_ID,
             messages=[{
                 "role": "user",
                 "content": [
@@ -143,8 +144,8 @@ async def _detect_car_color(image_url: str) -> int | None:
                     },
                 ],
             }],
-            max_tokens=12,
-            temperature=0,
+            max_completion_tokens=20,
+            reasoning_effort="none",
         )
         hex_str = resp.choices[0].message.content.strip().lower()
         if not hex_str.startswith('#'):
@@ -184,12 +185,12 @@ async def _gpt_normalize_xlsx(raw_text: str) -> list[dict]:
         "Return empty array only if no mods exist."
     )
     resp = await client.chat.completions.create(
-        model=os.getenv('OPENAI_FINAL_MODEL', 'gpt-4.1-mini-2025-04-14'),
+        model=DEFAULT_MODEL_ID,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": raw_text[:14000]},
         ],
-        temperature=0,
+        reasoning_effort="low",
         response_format={"type": "json_object"},
     )
     data = json.loads(resp.choices[0].message.content)

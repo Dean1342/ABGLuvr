@@ -5,15 +5,13 @@ A sophisticated Discord bot powered by OpenAI's GPT-4.1 with advanced conversati
 ## Features
 
 ### Core AI Capabilities
-- **Advanced Conversational AI**: Powered by OpenAI GPT-4.1 with context-aware responses
-- **Large Context Window**: Supports up to 100,000+ tokens for extended conversations
-- **Memory Management**: Maintains conversation history per user/channel with intelligent trimming
+- **Agentic Conversational AI**: OpenAI Responses API with a multi-round tool loop (search, currency, pings) and selectable models via `/model`
+- **Channel Awareness**: Reads the recent conversation in the channel (last ~40 messages from the past 12 hours, everyone included), so it can follow group chats. Context comes from Discord itself, so it survives restarts
 - **Multimodal Support**: Processes and analyzes images alongside text conversations
 
 ### Persona System
-- **20+ Unique Personas**: Switch between personalities including Yoda, Gordon Ramsay, Albert Einstein, and more
-- **Custom Real-User Personas**: Authentic personalities based on real Discord server members
-- **Per-Channel Memory**: Each channel remembers your selected persona
+- **Personas**: Switch between personalities including Gordon Ramsay, Albert Einstein, LeBron James, and more
+- **Per-Channel Memory**: Each channel remembers your selected persona and model, persisted across restarts
 - **Dynamic Switching**: Change personas instantly with slash commands
 
 ### Integrations
@@ -30,10 +28,9 @@ A sophisticated Discord bot powered by OpenAI's GPT-4.1 with advanced conversati
   - Support for year and cast-based search refinement
   - Rich embeds with posters and external links
 
-- **Web Search**: Intelligent web search with source citation
-  - Automatic search triggering for current events
-  - Source attribution and link formatting
-  - Summarization of search results
+- **Web Search**: OpenAI's native web search tool
+  - The model decides when to search and can search multiple times per answer
+  - Cited sources are appended as links
 
 ### User Experience
 - **Smart Channel Management**: Configurable allowed channels with mention override
@@ -56,7 +53,7 @@ src/
 │   └── spotify.py        # Spotify integration commands
 └── utils/                # Utility modules
     ├── ai/               # AI and language model utilities
-    ├── conversation/     # Memory and persona management
+    ├── conversation/     # Channel context, model registry, saved settings
     ├── core/            # Core utility functions
     ├── integrations/    # External API integrations
     └── ui/              # Discord UI components
@@ -92,8 +89,9 @@ src/
    SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
    SPOTIFY_REDIRECT_URI=your_spotify_redirect_uri
    TMDB_API_KEY=your_tmdb_api_key
-   GOOGLE_API_KEY=your_google_api_key
-   GOOGLE_CSE_ID=your_google_cse_id
+   SUPABASE_URL=your_supabase_url
+   SUPABASE_KEY=your_supabase_key
+   GEMINI_API_KEY=your_gemini_api_key
    ```
 
 4. **Run the bot:**
@@ -143,10 +141,12 @@ Upload images or reply to existing images while mentioning the bot to get AI-pow
 The bot automatically performs web searches when current information is needed and cites sources in responses.
 
 #### Persona System
-Choose from 20+ unique personalities including:
-- **Classic Characters**: Yoda, Dwight Schrute, Gordon Ramsay, Walter White
+Choose from personalities including:
+- **Characters**: Gordon Ramsay, LeBron James, Linus (LTT), Girlfriend
 - **Historical Figures**: Albert Einstein, Jesus Christ
 - **Professionals**: Michelin Star Chef, Fitness Trainer
+
+Personas are defined in `src/utils/ai/prompts.py`. File-backed personas (the old real-member ones) are kept there disabled, ready for a future overhaul.
 
 ## Configuration
 
@@ -159,10 +159,28 @@ Choose from 20+ unique personalities including:
 - `SPOTIFY_REDIRECT_URI` - Spotify OAuth redirect URI
 - `TMDB_API_KEY` - The Movie Database API key
 
+- `SUPABASE_URL` / `SUPABASE_KEY` - Supabase project (car builds, reminders, persona/model settings)
+- `GEMINI_API_KEY` - Google Gemini key for YouTube `/tldr`
+
 ### Optional Configuration
-- `OPENAI_FINAL_MODEL` - Override default GPT model (default: gpt-4.1-2025-04-14)
+- Default model: `DEFAULT_MODEL` in `src/utils/conversation/context.py` (GPT-6 Luna). It is used for chat (unless a user picks another with `/model`), `/tldr`, and `/build` helpers
+- `AI_REASONING_EFFORT` - Reasoning effort for GPT-5 family models (default: `low`)
+- `AI_LOG_TO_DB` - Set to `1` to also write per-turn agent logs to the Supabase `ai_logs` table
+- `server_context.txt` (repo root, gitignored) - Optional hand-written server facts (members, nicknames, cars) added to every prompt
+
+### Supabase Tables
+Create these once; the DDL is in comments in `src/utils/integrations/supabase_client.py`:
+`car_profiles`, `build_mods`, `build_labor`, `scheduled_reminders`, `user_settings`, and optionally `ai_logs`.
 
 ## Development
+
+### Evals
+`scripts/run_evals.py` runs the prompts in `scripts/evals.json` through the same router + agent path the bot uses (without Discord) and reports which tools each prompt triggered:
+```bash
+python scripts/run_evals.py --model "GPT-5.4 Mini"
+python scripts/run_evals.py --only search,multi-tool --out results.json
+```
+Every bot turn also logs one `[ai] {...}` JSON line (tools, rounds, tokens, latency) to stdout / Heroku logs.
 
 ### Project Structure
 The codebase follows modern Python practices with clear separation of concerns:
@@ -178,7 +196,8 @@ The codebase follows modern Python practices with clear separation of concerns:
 - `/persona selected` shows your current persona for the channel.
 
 ### Contextual Memory
-- The bot keeps a conversation history for each user in each channel, allowing for context-aware and continuous conversations. This history is trimmed to fit a large token window (up to 100,000 tokens).
+- When someone talks to the bot, it reads the recent messages in that channel (everyone's, plus its own replies) as context. Older images and files show up as placeholders; only the current message's attachments are sent in full.
+- `/model reset` and switching persona make the bot ignore earlier messages when answering you in that channel.
 
 ### Spotify Integration
 - Link your Spotify account with `/spotify link` (OAuth).
@@ -192,7 +211,7 @@ The codebase follows modern Python practices with clear separation of concerns:
 - Upload or reply to images and mention the bot to get AI-powered analysis and contextual responses.
 
 ### Web Search
-- The bot automatically performs web searches for current events or when needed, citing sources in its responses.
+- The model searches the web (OpenAI native web search) when it needs current information, can refine and repeat searches, and cites sources in its responses.
 
 ### Channel Management
 - The bot only responds in allowed channels (set via `CHANNEL_IDS` in `.env`) or when mentioned. Messages starting with `!` in allowed channels are ignored.

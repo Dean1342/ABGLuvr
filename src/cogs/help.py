@@ -330,7 +330,7 @@ class Help(commands.GroupCog, name="help"):
                 "`/help persona` — Learn about persona switching\n\n"
                 "`/model selected` — Show your current AI model\n"
                 "`/model options` — Change your AI model\n"
-                "`/model reset` — Clear your conversation history\n"
+                "`/model reset` — Start fresh: ignore earlier messages when answering you here\n"
                 "`/persona selected` — Show your current persona\n"
                 "`/persona options` — Change your persona\n"
                 "`/rate movie <title>` — Get movie ratings and info\n"
@@ -356,8 +356,8 @@ class Help(commands.GroupCog, name="help"):
         emb.add_field(
             name="Personas",
             value=(
-                "Switch between unique AI personalities like Yoda, Gordon Ramsay, "
-                "Dwight Schrute, Jagbir, Lemon, and many more!\n"
+                "Switch between AI personalities like Gordon Ramsay, Albert Einstein, "
+                "LeBron James, LTT, and more!\n"
                 "Each channel remembers your last selected persona."
             ),
             inline=False
@@ -366,7 +366,7 @@ class Help(commands.GroupCog, name="help"):
         emb.add_field(
             name="Key Features",
             value=(
-                "• Conversational AI: Context-aware chat with memory per user/channel\n"
+                "• Conversational AI: Follows the recent conversation in the channel, everyone included\n"
                 "• Model Selection: Choose from GPT-4.1 and GPT-5 variants\n"
                 "• Persona Switching: 20 unique personalities to choose from\n"
                 "• Image Support: Upload or reply to images for visual context\n"
@@ -544,15 +544,11 @@ class Help(commands.GroupCog, name="help"):
         emb.add_field(
             name="🎪 __Available Personas__",
             value=(
-                "**🧙‍♂️ Yoda** — Wise Jedi Master with unique speech patterns\n"
+                "😎 **Default** — ABGLuvr, a chill millennial who matches your energy\n"
                 "🧠 **Albert Einstein** — Brilliant physicist with scientific insights\n"
                 "✝️ **Jesus** — Kind, wise, and humble spiritual guidance\n"
                 "🇺🇸 **Republican** — Passionate conservative political views\n"
-                "📄 **Dwight Schrute** — Eccentric, ambitious, and loyal (The Office)\n"
-                "😤 **Ego** — Arrogant and superior personality\n"
-                "👨‍🍳 **Chef** — Michelin Star culinary expertise\n"
-                "💪 **Fitness Trainer** — Exercise and nutrition guidance\n"
-                "🔥 **Gordon Ramsay** — Fiery, brutally honest celebrity chef"
+                "👨‍🍳 **Chef** — Michelin Star culinary expertise"
             ),
             inline=False
         )
@@ -560,16 +556,11 @@ class Help(commands.GroupCog, name="help"):
         emb.add_field(
             name="🎪 __More Personas__",
             value=(
-                "🧬 **Eugene Porter** — Intelligent but socially awkward (Walking Dead)\n"
+                "💪 **Fitness Trainer** — Exercise and nutrition guidance\n"
+                "🔥 **Gordon Ramsay** — Fiery, brutally honest celebrity chef\n"
                 "🏀 **LeBron James** — Confident and charismatic basketball star\n"
                 "💻 **LTT** — Tech-savvy Linus Sebastian personality\n"
-                "⚗️ **Jesse Pinkman** — Unique speech patterns (Breaking Bad)\n"
-                "🧪 **Walter White** — Authoritative and intelligent (Breaking Bad)\n"
-                "🦾 **Tony Stark** — Genius billionaire playboy philanthropist\n"
-                "💕 **Girlfriend** — Supportive, caring, and loving\n"
-                "👥 **Jagbir** — Real Discord member personality\n"
-                "🍋 **Lemon** — Real Discord member personality\n"
-                "🎮 **Epoe** — Real Discord member personality"
+                "💕 **Girlfriend** — Supportive, caring, and loving"
             ),
             inline=False
         )
@@ -581,7 +572,7 @@ class Help(commands.GroupCog, name="help"):
                 "• Your persona choice is **per-channel** — different channels remember different personas\n"
                 "• The bot stays in character throughout the conversation\n"
                 "• Switch anytime with `/persona options`\n"
-                "• Default persona is friendly and helpful"
+                "• The Default persona mirrors whatever energy you bring"
             ),
             inline=False
         )
@@ -591,8 +582,7 @@ class Help(commands.GroupCog, name="help"):
             value=(
                 "• Try different personas for different types of conversations\n"
                 "• Use specific personas for their expertise (Chef for cooking, etc.)\n"
-                "• Real member personas (Jagbir, Lemon) are based on actual Discord users\n"
-                "• Each persona remembers your conversation history"
+                "• Switching persona starts a fresh conversation for you"
             ),
             inline=False
         )

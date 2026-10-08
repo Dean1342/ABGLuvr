@@ -60,3 +60,22 @@ async def convert_currency(amount, from_currency, to_currency):
         import traceback
         traceback.print_exc()
         return {"error": f"Unexpected error: {str(e)}"}
+
+
+def _format_number(num):
+    # Commas for readability; floats to at most 2 decimals with trailing zeros dropped
+    if isinstance(num, float):
+        return f"{num:,.2f}".rstrip('0').rstrip('.')
+    return f"{num:,}"
+
+
+def format_conversion(result):
+    # Discord-ready one-liner for a convert_currency() result
+    if not result.get("success"):
+        return f"❌ Currency conversion failed: {result.get('error', 'Unknown error')}"
+    return (
+        f"{_format_number(result['original_amount'])} {result['from_currency']} = "
+        f"**{_format_number(result['converted_amount'])} {result['to_currency']}**\n\n"
+        f"-# *Converted via ExchangeRate-API (Rate: 1 {result['from_currency']} = "
+        f"{_format_number(result['exchange_rate'])} {result['to_currency']})*"
+    )

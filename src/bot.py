@@ -18,16 +18,17 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-from utils.conversation.context import user_personas, user_conversations
-from utils.ai.multimodal import build_multimodal_content, clean_conversation_history, has_non_image_attachments
-from utils.core.datetime_utils import prepend_date_context
+from utils.conversation.context import user_personas, user_models, MODELS, resolve_model_name
+from utils.conversation.channel_context import record_message, update_message, forget_message, build_context
+from utils.ai.multimodal import build_multimodal_content
 from utils.core.text_formatting import fix_social_media_links, contains_social_media_links, contains_user_mentions, remove_mentions_from_text
-from utils.ai.message_processing import (
-    get_system_prompt, check_spotify_keywords, find_foreign_conversation,
-    build_user_message_content, get_function_schemas, handle_openai_response,
-    send_response, update_conversation_history
-)
-from utils.interactions.actions import handle_pending_action, PING_ACTIONS_INSTRUCTION
+from utils.ai.message_processing import build_user_message_content, send_response
+from utils.ai.prompts import build_instructions, resolve_persona
+from utils.ai.agent import run_agent
+from utils.ai.tools import ToolContext
+from utils.ai.router import match_currency_conversion
+from utils.integrations.currency import convert_currency, format_conversion
+from utils.interactions.actions import handle_pending_action, confirmation_footer
 
 # Main bot entry point and event handlers
 
@@ -94,6 +95,16 @@ class MyBot(commands.Bot):
 # Initialize bot
 bot = MyBot(command_prefix="/", intents=intents)
 
+# One shared OpenAI client (connection pooling); retries are handled by the SDK.
+_openai_client = None
+
+
+def get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'), timeout=60.0, max_retries=2)
+    return _openai_client
+
 @bot.event
 async def on_ready():
     # Called when the bot is ready
@@ -110,13 +121,56 @@ async def on_ready():
     except Exception as e:
         import traceback
         traceback.print_exc()
+    # Restore saved /persona and /model selections.
+    try:
+        from utils.conversation.settings import restore_user_settings
+        await restore_user_settings()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+
+def _tldr_context(message):
+    # When a message replies to a TLDR embed, hand the agent that video's transcript.
+    ref = message.reference
+    if not ref or not ref.message_id:
+        return None
+    from cogs.transcribe import tldr_results
+    result = tldr_results.get(ref.message_id)
+    if not result:
+        return None
+    title = result["metadata"].get("title", "Unknown")
+    return {
+        "role": "system",
+        "content": (
+            "You posted a TLDR of this video, and the next user message is a direct reply to it, "
+            "so treat the video as the obvious subject.\n"
+            f"Title: \"{title}\"\nYour summary: {result['summary']}\n"
+            f"Transcript:\n{result['transcript'][:8000]}"
+        ),
+    }
+
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    # Keep channel context current (TLDR progress messages turn into embeds this way).
+    if after.guild:
+        update_message(after, bot.user.id)
+
+
+@bot.event
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    forget_message(payload.channel_id, payload.message_id)
+
 
 @bot.event
 async def on_message(message: discord.Message):
     # Handles incoming messages
 
-    # Ignore bot messages and DMs
-    if message.author.bot or not message.guild:
+    if not message.guild:
+        return
+    # Everything in the channel (the bot's own messages included) feeds channel context.
+    record_message(message, bot.user.id)
+    if message.author.bot:
         return
 
     # TLDR mention shortcut — run BEFORE the link fixer, but don't return yet so the
@@ -229,111 +283,72 @@ async def on_message(message: discord.Message):
             return
 
     channel_id = message.channel.id
-    user_id = message.author.id
-    conv_key = (user_id, channel_id)
+    conv_key = (message.author.id, channel_id)
 
-    # Check for foreign conversation context
-    use_foreign_convo, foreign_conv_key, original_user_id, original_display_name = await find_foreign_conversation(
-        message, bot, channel_id
-    )
+    persona = resolve_persona(user_personas.get(conv_key))
+    model_name = resolve_model_name(user_models.get(conv_key))
+    instructions = build_instructions(persona)
 
-    active_conv_key = foreign_conv_key if use_foreign_convo else conv_key
-
-    # Inject TLDR video context when user replies to a TLDR embed
-    if message.reference and message.reference.message_id:
-        try:
-            from cogs.transcribe import tldr_results
-            ref_id = message.reference.message_id
-            if ref_id in tldr_results:
-                result = tldr_results[ref_id]
-                marker = f"[TLDR:{ref_id}]"
-                conv = user_conversations.get(active_conv_key, [])
-                if not any(marker in (m.get("content") or "") for m in conv):
-                    title = result["metadata"].get("title", "Unknown")
-                    ctx_block = (
-                        f"{marker}\nThe user is asking about a video they TLDRed.\n"
-                        f"Title: \"{title}\"\nTranscript:\n{result['transcript'][:8000]}"
-                    )
-                    insert_at = 1 if len(conv) > 0 else 0
-                    conv.insert(insert_at, {"role": "system", "content": ctx_block})
-                    conv.insert(insert_at + 1, {"role": "assistant", "content": result["summary"]})
-                    user_conversations[active_conv_key] = conv
-        except Exception:
-            pass  # never let this block the normal message pipeline
-
-    persona = user_personas.get(active_conv_key, "Default")
-    
-    # Get system prompt and model
-    system_prompt, model = await get_system_prompt(persona, active_conv_key)
-    
-    # Add Spotify instruction if needed
-    spotify_instruction = ""
-    if check_spotify_keywords(message.content or ""):
-        spotify_instruction = "\n\nNOTE: Only add Spotify links if you are specifically recommending music that the user has explicitly requested. Do NOT add Spotify links to general conversations."
-
-    current_system_prompt = prepend_date_context(system_prompt + spotify_instruction + PING_ACTIONS_INSTRUCTION)
-
-    # Initialize or update conversation
-    conversation = user_conversations.get(active_conv_key, [])
-    if not conversation or conversation[0]["role"] != "system":
-        conversation = [{"role": "system", "content": current_system_prompt}]
-    else:
-        conversation[0]["content"] = current_system_prompt
-
-    # Build multimodal content from message
+    # Build multimodal content from message (quotes the replied-to message, attaches images/files)
     content = await build_multimodal_content(message)
 
-    # Check if message has non-image file attachments to determine if web search should be available
-    has_files = has_non_image_attachments(message)
-
-    # Set up OpenAI client
     openai_api_key = os.getenv('OPENAI_API_KEY', 'YOUR_OPENAI_API_KEY')
     if openai_api_key == 'YOUR_OPENAI_API_KEY':
         await message.reply("⚠️ OpenAI API key not configured. Please check your environment variables.")
         return
-    
-    client = AsyncOpenAI(
-        api_key=openai_api_key,
-        timeout=60.0,
-        max_retries=2
+
+    api_message_content, display_name, username, user_id = build_user_message_content(message, content)
+
+    # Plain conversions ("50 usd to eur") are answered directly, no LLM involved.
+    conversion = None if message.attachments else match_currency_conversion(message.content or "")
+    if conversion:
+        answer = format_conversion(await convert_currency(*conversion))
+        await send_response(message, answer)
+        return
+
+    # Recent channel messages (everyone's, oldest first), plus video context for TLDR replies
+    history = await build_context(message, bot.user.id, user_id)
+    try:
+        tldr = _tldr_context(message)
+        if tldr:
+            history.append(tldr)
+    except Exception:
+        pass  # never let this block the normal message pipeline
+
+    client = get_openai_client()
+    model = MODELS[model_name]
+    ctx = ToolContext(
+        client=client,
+        model_id=model["id"],
+        instructions=instructions,
+        reasoning=model["api"]["reasoning"],
     )
+    log_meta = {
+        "user_id": user_id,
+        "guild_id": message.guild.id,
+        "channel_id": channel_id,
+        "persona": persona,
+        "context_messages": len(history),
+        "message": (message.content or "")[:200],
+    }
 
-    # Build user message for OpenAI
-    api_message_content, clean_message_content, display_name, username, user_id = build_user_message_content(
-        message, content, original_user_id, original_display_name
-    )
-
-    # Clean conversation history
-    conversation = await clean_conversation_history(conversation)
-    api_ready_conversation = []
-    for msg in conversation:
-        api_msg = {"role": msg["role"], "content": msg["content"]}
-        api_ready_conversation.append(api_msg)
-        
-    messages = api_ready_conversation + [{"role": "user", "content": api_message_content}]
-
-    # Call OpenAI and send response
     async with message.channel.typing():
-        function_schemas = get_function_schemas()
-        choice, answer, pending_action = await handle_openai_response(client, messages, function_schemas, model, openai_api_key)
+        result = await run_agent(client, model_name, instructions, history, api_message_content, ctx, log_meta)
 
-        if choice is None:
-            await message.reply(answer)
-            return
+    if result.failed:
+        await message.reply(result.text)
+        return
 
-    # Capture the sent ack so an interactive action can react to it. Confirmation/
-    # execution runs OUTSIDE the typing() block so the reaction wait doesn't hang it.
+    pending_actions = result.pending_actions
+    answer = result.text + confirmation_footer(pending_actions)
+
     # For ping/schedule acks, suppress mentions so the target isn't pinged (spoiled)
     # by the acknowledgement — only the actual action should ping them.
-    ack_message = await send_response(message, answer, suppress_mentions=bool(pending_action))
+    ack_message = await send_response(message, answer, suppress_mentions=bool(pending_actions))
 
-    if pending_action:
-        await handle_pending_action(bot, message, ack_message, pending_action)
-
-    # Update conversation history
-    await update_conversation_history(
-        conversation, clean_message_content, answer, user_id, display_name, username, active_conv_key, openai_api_key
-    )
+    # Confirmation/execution runs OUTSIDE the typing() block so the reaction wait doesn't hang it.
+    for pending in pending_actions:
+        await handle_pending_action(bot, message, ack_message, pending)
 
 # Run the bot
 if __name__ == "__main__":

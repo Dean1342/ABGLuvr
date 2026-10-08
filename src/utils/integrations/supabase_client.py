@@ -1,3 +1,4 @@
+import datetime
 import os
 from supabase import AsyncClient, acreate_client
 
@@ -162,3 +163,49 @@ async def get_pending_reminders() -> list[dict]:
 async def delete_reminder(reminder_id: str) -> None:
     client = await get_client()
     await client.table("scheduled_reminders").delete().eq("id", reminder_id).execute()
+
+
+# --- user_settings ---
+# Per-user, per-channel /persona and /model selections, so they survive restarts.
+# Table DDL (run once in Supabase):
+#   create table user_settings (
+#     user_id    bigint      not null,
+#     channel_id bigint      not null,
+#     persona    text,
+#     model      text,
+#     updated_at timestamptz default now(),
+#     primary key (user_id, channel_id)
+#   );
+
+async def get_all_user_settings() -> list[dict]:
+    client = await get_client()
+    result = await client.table("user_settings").select("user_id,channel_id,persona,model").execute()
+    return result.data or []
+
+
+async def upsert_user_setting(user_id: int, channel_id: int, **fields) -> None:
+    client = await get_client()
+    await client.table("user_settings").upsert(
+        {
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            **fields,
+        },
+        on_conflict="user_id,channel_id"
+    ).execute()
+
+
+# --- ai_logs ---
+# Optional per-turn agent logs (enabled with AI_LOG_TO_DB=1; Heroku only keeps ~1500 log lines).
+# Table DDL (run once in Supabase):
+#   create table ai_logs (
+#     id         bigint generated always as identity primary key,
+#     created_at timestamptz default now(),
+#     request_id text,
+#     data       jsonb not null
+#   );
+
+async def insert_ai_log(log: dict) -> None:
+    client = await get_client()
+    await client.table("ai_logs").insert({"request_id": log.get("request_id"), "data": log}).execute()
