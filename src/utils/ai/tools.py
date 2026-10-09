@@ -8,7 +8,9 @@
 # pending action on the ToolContext, which bot.py's on_message runs after the reply is
 # sent (confirmation gate, scheduling, etc. live in utils/interactions/actions.py).
 # Memory tools only read/write the fact store, so they run inline; the ids and member
-# resolver they need come in on the ToolContext.
+# resolver they need come in on the ToolContext. inspect_video watches videos the message
+# refers to (utils/media); it gets a longer timeout than the agent's default.
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -17,6 +19,7 @@ from openai import AsyncOpenAI
 
 from utils.conversation import memory
 from utils.integrations.currency import convert_currency, format_conversion
+from utils.media import watch
 from utils.interactions.actions import (
     get_interaction_function_schemas, build_pending_action, build_ack_instruction,
     build_delivery_instruction
@@ -36,6 +39,10 @@ class ToolContext:
     requester_id: int | None = None
     message_id: int | None = None
     resolve_user: Callable[[str], int | None] | None = None  # name or mention -> member id
+    # Videos the message refers to (utils/media/resolve.py), by ref ("v1"), and a callback
+    # that shows slow watching steps in the channel.
+    videos: dict = field(default_factory=dict)
+    on_progress: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass
@@ -44,6 +51,7 @@ class Tool:
     description: str
     parameters: dict
     handler: Callable[[dict, ToolContext], Awaitable[str]]
+    timeout: float | None = None  # seconds; None uses the agent's default
 
     def spec(self) -> dict:
         return {
@@ -257,7 +265,70 @@ FORGET_FACT = Tool(
 )
 
 
-TOOLS = {tool.name: tool for tool in (CONVERT_CURRENCY, PING_USER, REMEMBER_FACT, FORGET_FACT)}
+# --- inspect_video ---
+
+_INSPECT_WAIT = 200  # seconds; a longer watch keeps going in the background (and gets cached)
+_watching = set()    # strong refs to those background watches
+
+
+async def _no_progress(text):
+    pass
+
+
+async def _inspect_video(args, ctx):
+    video = ctx.videos.get(str(args.get("video") or "").strip())
+    if video is None:
+        listed = ", ".join(ctx.videos) or "none"
+        return (f"Error: there's no video '{args.get('video')}' here (listed: {listed}). Only videos in the Videos "
+                "note can be inspected; if none fits, ask which video they mean.")
+    question = (args.get("question") or "").strip() or None
+    on_step = ctx.on_progress or _no_progress
+    if args.get("look_closer") and question:
+        job = watch.look_closer(video, question, on_step)
+    else:
+        job = watch.inspect(video, question, on_step)
+    task = asyncio.ensure_future(job)
+    _watching.add(task)
+    task.add_done_callback(_watching.discard)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), _INSPECT_WAIT)
+    except asyncio.TimeoutError:
+        return ("Error: still watching it (it's a long video); that keeps going in the background. Tell them it's "
+                "taking a while and to ask again in a minute or two. Don't describe the video yet.")
+    except ValueError as e:
+        return f"Error: couldn't watch {video.ref}: {e} Tell them you couldn't watch it and why. Don't guess what's in it."
+
+
+INSPECT_VIDEO = Tool(
+    name="inspect_video",
+    description=(
+        "Watches a video and returns what's in it: speech, on-screen text and what happens, with timestamps. "
+        "Videos watched before come back instantly. The videos you can inspect are listed by ref (v1, v2...) in "
+        "a Videos note before the latest message. Call it before saying anything about what a listed video shows; "
+        "a link, title or thumbnail isn't the video. Don't call it when the message isn't about the video's "
+        "content.\n\n"
+        "Pass what they asked as `question` so the viewer pays attention to what matters. If the result doesn't "
+        "answer a specific question about the footage (a detail, a moment, how something was done), call it "
+        "again with look_closer=true to have it re-watched with that question in mind."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "video": {"type": "string", "description": "The video's ref from the Videos note, e.g. 'v1'"},
+            "question": {"type": "string",
+                         "description": "What they asked, close to their own words (\"how did they do this\"). "
+                                        "Don't describe or guess what the video is: you haven't seen it yet, and "
+                                        "other videos in the chat may be different ones."},
+            "look_closer": {"type": "boolean", "description": "Re-watch for this question (only after a first inspect)"},
+        },
+        "required": ["video"],
+    },
+    handler=_inspect_video,
+    timeout=_INSPECT_WAIT + 30,
+)
+
+
+TOOLS = {tool.name: tool for tool in (CONVERT_CURRENCY, PING_USER, REMEMBER_FACT, FORGET_FACT, INSPECT_VIDEO)}
 
 
 def function_specs() -> list[dict]:

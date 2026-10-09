@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from http.cookiejar import MozillaCookieJar
 from urllib.parse import urlsplit
 from openai import AsyncOpenAI
-from utils.conversation.context import DEFAULT_MODEL_ID
 
 MAX_DURATION_SECONDS = 1800   # 30-minute cap
 
@@ -102,6 +101,11 @@ def extract_url_from_text(text: str) -> str | None:
     return m.group(0).rstrip('.,)') if m else None
 
 
+def extract_video_urls(text: str) -> list[str]:
+    """Every recognized video URL in text, in order."""
+    return [m.group(0).rstrip('.,)') for m in _VIDEO_URL_RE.finditer(text or "")]
+
+
 def normalize_url(url: str) -> str:
     """Convert bot embed-fix proxy domains back to originals that yt-dlp understands."""
     # Unwrap Discord's <no-embed> brackets and pull the link out of any surrounding text
@@ -140,6 +144,9 @@ def _extract_metadata(info: dict, fallback_url: str) -> dict:
         "thumbnail":   info.get("thumbnail"),
         "uploader":    info.get("uploader") or info.get("channel", ""),
         "webpage_url": info.get("webpage_url", fallback_url),
+        # The site's own id for the video (utils/media/store.info_key uses it as a cache key)
+        "id":          info.get("id"),
+        "extractor":   info.get("extractor_key"),
     }
 
 
@@ -265,59 +272,6 @@ async def download_video(url: str) -> tuple[str, dict]:
     return out_path, _extract_metadata(info, url)
 
 
-def extract_frames(video_path: str, duration: int) -> list[str]:
-    """
-    Extract evenly-spaced frames from a video using OpenCV.
-    Returns base64-encoded JPEG strings, or [] if cv2 is unavailable or fails.
-
-    Frame count by duration:
-      ≤ 30 sec  → 4 frames
-      30–90 sec → 6 frames
-      90–180 sec → 8 frames
-    Skips first/last second to avoid intro/outro cards.
-    """
-    try:
-        import cv2
-    except ImportError:
-        return []
-
-    n_frames = 4 if duration <= 30 else (6 if duration <= 90 else 8)
-
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return []
-
-    fps          = cap.get(cv2.CAP_PROP_FPS) or 25
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    start_frame  = int(fps)
-    end_frame    = max(start_frame + 1, total_frames - int(fps))
-    usable       = end_frame - start_frame
-
-    if usable < 1:
-        cap.release()
-        return []
-
-    step       = max(1, usable // n_frames)
-    frames_b64 = []
-
-    for i in range(n_frames):
-        frame_idx = start_frame + i * step
-        if frame_idx >= total_frames:
-            break
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        h, w = frame.shape[:2]
-        if w > 640:
-            frame = cv2.resize(frame, (640, int(h * 640 / w)))
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        frames_b64.append(base64.b64encode(buf).decode("utf-8"))
-
-    cap.release()
-    return frames_b64
-
-
 def _carousel_match_filter(info_dict, *, incomplete=False):
     """
     Duration filter for individual carousel entries.
@@ -432,7 +386,6 @@ async def download_attachment(url: str, filename: str) -> str:
 
 
 _WHISPER_MAX_BYTES = 25 * 1024 * 1024  # Whisper API hard limit
-_SUMMARY_TRANSCRIPT_CHARS = 60_000      # ~60 min of speech
 
 
 def _extract_audio_track_sync(video_path: str) -> str:
@@ -493,73 +446,3 @@ async def transcribe_audio(path: str, openai_client: AsyncOpenAI) -> str:
             response_format="text",
         )
     return (response if isinstance(response, str) else response.text).strip()
-
-
-async def summarize_transcript(
-    transcript: str,
-    metadata: dict,
-    mode: str,
-    openai_client: AsyncOpenAI,
-    frames: list[str] | None = None,
-) -> str:
-    """
-    Summarize a transcript using GPT.
-    mode: "brief"    → one-sentence intro + 3–5 bullet points
-          "detailed" → 2–3 paragraphs
-    frames: optional list of base64 JPEG strings for visual context (short-form video)
-    """
-    has_frames = bool(frames)
-
-    if mode == "brief":
-        instruction = (
-            "You are a helpful assistant that summarizes video content. "
-            "Give a brief TLDR of this video. "
-            "Start with one sentence capturing the core topic, then use 3–5 concise bullet points. "
-            "Be direct and skimmable."
-        )
-        max_completion_tokens = 1500
-    else:
-        instruction = (
-            "You are a helpful assistant that summarizes video content. "
-            "Give a detailed summary of this video. "
-            "Write 2–3 short paragraphs covering the main topic, key points or arguments, "
-            "and any notable details, quotes, or conclusions. Be thorough but clear."
-        )
-        max_completion_tokens = 2500
-
-    if has_frames:
-        instruction += (
-            " You are also given frames sampled from the video at even intervals. "
-            "Use them to add visual context to your summary."
-        )
-
-    title_hint       = f'Video title: "{metadata.get("title", "Unknown")}"'
-    transcript_body  = transcript[:_SUMMARY_TRANSCRIPT_CHARS]
-    if len(transcript) > _SUMMARY_TRANSCRIPT_CHARS:
-        transcript_body += "\n\n[Transcript truncated — only the first portion was summarized]"
-
-    if has_frames:
-        user_content: list = [
-            {"type": "text", "text": f"{title_hint}\n\nTranscript:\n{transcript_body}"},
-        ]
-        for b64 in frames:
-            user_content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"},
-            })
-    else:
-        user_content = f"{title_hint}\n\nTranscript:\n{transcript_body}"
-
-    messages = [
-        {"role": "system", "content": instruction},
-        {"role": "user",   "content": user_content},
-    ]
-
-    resp = await openai_client.chat.completions.create(
-        model=DEFAULT_MODEL_ID,
-        messages=messages,
-        # Generous cap: reasoning tokens count toward it; length is set by the instruction
-        max_completion_tokens=max_completion_tokens,
-        reasoning_effort="low",
-    )
-    return resp.choices[0].message.content.strip()

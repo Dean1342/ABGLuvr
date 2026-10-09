@@ -292,8 +292,9 @@ async def delete_facts(guild_id: int, fact_ids: list[int]) -> list[int]:
 
 
 # --- tldr_results ---
-# TLDR transcripts/summaries keyed by the embed's message id, so replies to a TLDR keep
-# their video context across restarts (cogs/transcribe.py). Pruned after 30 days.
+# TLDR summaries and evidence reports keyed by the embed's message id, so replies to a TLDR
+# keep their video context across restarts (cogs/transcribe.py). media_key points at the
+# video's media_analyses row (see below). Pruned after 30 days.
 # Table DDL (run once in Supabase):
 #   create table tldr_results (
 #     message_id bigint primary key,
@@ -303,12 +304,16 @@ async def delete_facts(guild_id: int, fact_ids: list[int]) -> list[int]:
 #     created_at timestamptz default now()
 #   );
 
-async def upsert_tldr_result(message_id: int, title: str, summary: str, transcript: str) -> None:
+async def upsert_tldr_result(message_id: int, title: str, summary: str, transcript: str,
+                             media_key: str | None = None) -> None:
     client = await get_client()
-    await client.table("tldr_results").upsert(
-        {"message_id": message_id, "title": title, "summary": summary, "transcript": transcript},
-        on_conflict="message_id"
-    ).execute()
+    row = {"message_id": message_id, "title": title, "summary": summary, "transcript": transcript}
+    try:
+        await client.table("tldr_results").upsert({**row, "media_key": media_key}, on_conflict="message_id").execute()
+    except Exception as e:
+        # media_key (Phase 3) may not exist yet; the TLDR itself still has to be saved.
+        print(f"[tldr] saving without media_key ({type(e).__name__}); run the media_analyses SQL")
+        await client.table("tldr_results").upsert(row, on_conflict="message_id").execute()
 
 
 async def get_tldr_result(message_id: int) -> dict | None:
@@ -320,3 +325,50 @@ async def get_tldr_result(message_id: int) -> dict | None:
 async def prune_tldr_results(older_than: datetime.datetime) -> None:
     client = await get_client()
     await client.table("tldr_results").delete().lt("created_at", older_than.isoformat()).execute()
+
+
+# --- media_analyses ---
+# What the bot learned from watching a video (utils/media/store.py): the watchers' reports
+# and the post's metadata, found by any id the video is known by (e.g. instagram:DeObnKXMGkV,
+# tiktok:7420..., tiktok-short:ZPLjsNRF9, discord:<attachment id>), so the same video isn't
+# downloaded and watched again for 30 days. No video or frames are stored.
+# Table DDL (run once in Supabase):
+#   create table media_analyses (
+#     id         bigint generated always as identity primary key,
+#     keys       text[]      not null,
+#     version    int         not null,
+#     metadata   jsonb,
+#     evidence   jsonb       not null,
+#     created_at timestamptz default now()
+#   );
+#   create index media_analyses_keys on media_analyses using gin (keys);
+#   alter table tldr_results add column media_key text;
+
+async def find_media_analysis(keys: list[str], version: int, since: datetime.datetime) -> dict | None:
+    client = await get_client()
+    result = (
+        await client.table("media_analyses").select("*")
+        .overlaps("keys", keys)
+        .eq("version", version)
+        .gt("created_at", since.isoformat())
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+async def insert_media_analysis(data: dict) -> dict | None:
+    client = await get_client()
+    result = await client.table("media_analyses").insert(data).execute()
+    return result.data[0] if result.data else None
+
+
+async def set_media_keys(row_id: int, keys: list[str]) -> None:
+    client = await get_client()
+    await client.table("media_analyses").update({"keys": keys}).eq("id", row_id).execute()
+
+
+async def prune_media_analyses(older_than: datetime.datetime) -> None:
+    client = await get_client()
+    await client.table("media_analyses").delete().lt("created_at", older_than.isoformat()).execute()

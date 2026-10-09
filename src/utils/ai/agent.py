@@ -196,7 +196,7 @@ async def _run_tool(call, ctx, log):
         output = "Error: tool arguments were not valid JSON."
     else:
         try:
-            output = await asyncio.wait_for(tool.handler(args, ctx), TOOL_TIMEOUT_SECONDS)
+            output = await asyncio.wait_for(tool.handler(args, ctx), tool.timeout or TOOL_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             output = f"Error: {call.name} timed out."
         except Exception as e:

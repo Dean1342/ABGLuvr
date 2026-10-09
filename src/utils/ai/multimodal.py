@@ -229,18 +229,24 @@ def extract_text_from_txt(file_bytes):
         return None
 
 
+_PLAIN_TEXT = ('.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml')
+_TEXT_EXTRACTABLE = ('.pdf', '.docx', '.xlsx', '.csv') + _PLAIN_TEXT
+
+
 async def process_file_attachment(attachment):
     """Process a file attachment and extract text content"""
     if not attachment.filename:
         return None
-    
-    # Download the file
+
+    filename = attachment.filename.lower()
+    # Check the type before downloading: videos and other unreadable files can be 100+ MB.
+    if not filename.endswith(_TEXT_EXTRACTABLE):
+        return None
+
     file_bytes = await download_file(attachment.url)
     if not file_bytes:
         return None
-    
-    filename = attachment.filename.lower()
-    
+
     # Determine file type and extract text
     if filename.endswith('.pdf'):
         return extract_text_from_pdf(file_bytes)
@@ -250,10 +256,11 @@ async def process_file_attachment(attachment):
         return extract_text_from_xlsx(file_bytes)
     elif filename.endswith('.csv'):
         return extract_text_from_csv(file_bytes)
-    elif filename.endswith(('.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml')):
+    elif filename.endswith(_PLAIN_TEXT):
         return extract_text_from_txt(file_bytes)
     else:
         return None
+
 
 
 def truncate_text(text, max_chars=150_000):

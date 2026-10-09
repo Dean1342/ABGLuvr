@@ -8,29 +8,15 @@ from discord.ext import commands
 from typing import Literal
 from openai import AsyncOpenAI
 
-from utils.integrations.video import (
-    VideoDownloadError,
-    download_audio, download_video, download_instagram_video, download_attachment,
-    transcribe_audio, summarize_transcript,
-    extract_frames, extract_url_from_text, normalize_url, extract_audio_track,
-)
+from utils.integrations.video import extract_url_from_text, normalize_url
 from utils.integrations import supabase_client as db
-from utils.integrations.youtube import (
-    extract_youtube_id, get_youtube_metadata, transcribe_youtube, youtube_max_seconds,
-)
-
-# Platforms where we download full video and extract frames for visual context
-_SHORT_FORM_PLATFORMS = {"TikTok", "Instagram", "Twitter/X"}
-_SHORT_FORM_MAX_DURATION = 180  # seconds
-_WHISPER_SIZE_LIMIT = 25 * 1024 * 1024  # 25 MB — Whisper API hard limit
-
-# Containers Whisper accepts directly. Anything else (.mov, .mkv, .avi, raw .aac, .wma…)
-# must have its audio track extracted/transcoded to AAC/mp4 first via PyAV.
-_WHISPER_SUPPORTED_EXTS = {"flac", "m4a", "mp3", "mp4", "mpeg", "mpga", "oga", "ogg", "wav", "webm"}
+from utils.media.evidence import summarize_video
+from utils.media.watch import detect_platform, watch_attachment, watch_url
 
 # TLDR result cache keyed by Discord message ID — used for video conversation context.
 # Written through to Supabase tldr_results so replies to a TLDR keep working after a
-# restart; the DB copy keeps only what bot.py's _tldr_context uses.
+# restart; the DB copy keeps only what bot.py's _tldr_context uses. "transcript" holds
+# the whole evidence report (speech, on-screen text, what happens), not just speech.
 tldr_results: dict[int, dict] = {}
 _TLDR_MAX_CACHE = 100
 _TLDR_STORED_TRANSCRIPT_CHARS = 60_000  # matches what follow-ups can use (bot.TLDR_CONTEXT_CHARS)
@@ -48,7 +34,7 @@ def _cache_tldr_result(msg_id: int, result: dict) -> None:
 async def _save_tldr_result(msg_id: int, transcript: str, metadata: dict, summary: str) -> None:
     try:
         await db.upsert_tldr_result(msg_id, metadata.get("title") or "Unknown", summary,
-                                    transcript[:_TLDR_STORED_TRANSCRIPT_CHARS])
+                                    transcript[:_TLDR_STORED_TRANSCRIPT_CHARS], metadata.get("media_key"))
     except Exception as e:
         print(f"[tldr] couldn't save result {msg_id}: {type(e).__name__}: {e}")
 
@@ -70,7 +56,8 @@ async def get_tldr_result(msg_id: int) -> dict | None:
         return None
     if not row:
         return None
-    result = {"transcript": row["transcript"] or "", "metadata": {"title": row["title"]}, "summary": row["summary"] or ""}
+    result = {"transcript": row["transcript"] or "", "summary": row["summary"] or "",
+              "metadata": {"title": row["title"], "media_key": row.get("media_key")}}
     _cache_tldr_result(msg_id, result)
     return result
 
@@ -80,16 +67,6 @@ async def prune_stored_tldrs() -> None:
         await db.prune_tldr_results(datetime.datetime.now(datetime.timezone.utc) - _TLDR_RETENTION)
     except Exception as e:
         print(f"[tldr] couldn't prune stored results: {type(e).__name__}: {e}")
-
-
-def _detect_platform(url: str) -> str:
-    u = url.lower()
-    if "youtube.com" in u or "youtu.be" in u:    return "YouTube"
-    if "twitter.com" in u or "x.com" in u:       return "Twitter/X"
-    if "tiktok.com" in u:                         return "TikTok"
-    if "instagram.com" in u:                      return "Instagram"
-    if "reddit.com" in u or "redd.it" in u:      return "Reddit"
-    return "Video"
 
 
 def _platform_color(platform: str) -> discord.Color:
@@ -117,28 +94,28 @@ def _build_tldr_embed(
     platform: str,
     transcript: str,
     include_transcript: bool,
-    used_vision: bool,
-    src_label: str | None = None,
+    src_label: str,
 ) -> tuple[discord.Embed, list[discord.File]]:
     title       = (metadata.get("title") or "Video Summary")[:200]
     dur_str     = _fmt_duration(metadata.get("duration", 0))
     icon        = "📋" if mode == "brief" else "📄"
     mode_label  = "Brief" if mode == "brief" else "Detailed"
-    src_label   = src_label or ("Whisper + Vision" if used_vision else "Whisper")
 
     emb = discord.Embed(
         title=f"{icon} {title}",
         url=metadata.get("webpage_url"),
-        description=summary,
+        description=summary[:4096],  # Discord's embed description limit
         color=_platform_color(platform),
     )
     if metadata.get("thumbnail"):
         emb.set_thumbnail(url=metadata["thumbnail"])
-    emb.set_footer(text=f"{platform} • {dur_str} • Transcribed with {src_label} • {mode_label} summary")
+    emb.set_footer(text=f"{platform} • {dur_str} • {src_label} • {mode_label} summary")
 
     files = []
     if include_transcript:
-        if len(transcript) > 800:
+        if not transcript.strip():
+            emb.add_field(name="Full Transcript", value="*(no speech in this video)*", inline=False)
+        elif len(transcript) > 800:
             txt_bytes = io.BytesIO(transcript.encode("utf-8"))
             files.append(discord.File(
                 txt_bytes,
@@ -172,118 +149,11 @@ async def _run_tldr(
 ) -> tuple[discord.Embed, list[discord.File], str, dict, str]:
     """
     Core TLDR pipeline shared by all invocation modes.
-    Returns (embed, files, transcript, metadata, summary).
+    Returns (embed, files, evidence report, metadata, summary).
     Raises ValueError for user-facing errors, Exception for unexpected failures.
     """
-    platform   = _detect_platform(url)
-    media_path = None
-    frames: list[str] = []
-    used_vision = False
-    src_label = None
-
-    try:
-        if platform == "YouTube":
-            video_id = extract_youtube_id(url)
-            if not video_id:
-                raise ValueError("Couldn't find a video ID in that YouTube link.")
-            await on_step("Fetching YouTube video info...")
-            metadata = await get_youtube_metadata(video_id)
-            max_seconds = youtube_max_seconds()
-            if (metadata.get("duration") or 0) > max_seconds:
-                raise ValueError(f"Video is too long — max {max_seconds // 60} minutes for YouTube.")
-            await on_step("Transcribing with Gemini... (long videos can take a minute)")
-            transcript = await transcribe_youtube(video_id)
-            src_label = "Gemini"
-
-        elif platform in _SHORT_FORM_PLATFORMS:
-            await on_step(f"Downloading {platform} video...")
-            transcript = None
-            metadata = {}
-
-            # Try video download first (enables frame extraction for visual context)
-            try:
-                if platform == "Instagram":
-                    media_path, metadata = await download_instagram_video(url)
-                else:
-                    media_path, metadata = await download_video(url)
-            except ValueError as dl_err:
-                if isinstance(dl_err, VideoDownloadError) and not dl_err.retryable_with_audio:
-                    raise
-                print(f"[tldr] video download failed ({dl_err}), falling back to audio-only")
-                media_path = None
-
-            if media_path:
-                duration = metadata.get("duration", 0) or 0
-                video_size = os.path.getsize(media_path)
-                # Extract frames regardless of file size — they're sent to vision, not Whisper
-                if duration <= _SHORT_FORM_MAX_DURATION:
-                    frames = extract_frames(media_path, duration)
-                    used_vision = bool(frames)
-                # Only send to Whisper if within the 25 MB API limit
-                if video_size <= _WHISPER_SIZE_LIMIT:
-                    await on_step("Transcribing...")
-                    try:
-                        transcript = await transcribe_audio(media_path, openai_client)
-                    except Exception as whisper_err:
-                        print(f"[tldr] video transcription failed ({whisper_err}), falling back to audio-only")
-                        transcript = None
-                else:
-                    print(f"[tldr] video file {video_size // (1024 * 1024)} MB exceeds Whisper limit, falling back to audio-only")
-
-            if not transcript:
-                audio_path = None
-                try:
-                    if media_path:
-                        # Video already on disk — demux the audio track in-process.
-                        # PyAV copies the AAC stream without re-encoding: ~2 MB from a 27 MB mp4.
-                        await on_step("Extracting audio track...")
-                        try:
-                            audio_path = await extract_audio_track(media_path)
-                        except Exception as extraction_err:
-                            print(f"[tldr] audio extraction failed ({extraction_err}), downloading instead")
-                            audio_path = None
-
-                    if audio_path is None:
-                        step_msg = "Downloading audio..." if not media_path else "Retrying with audio download..."
-                        await on_step(step_msg)
-                        audio_path, audio_meta = await download_audio(url)
-                        if not metadata:
-                            metadata = audio_meta
-
-                    await on_step("Transcribing...")
-                    transcript = await transcribe_audio(audio_path, openai_client)
-                except VideoDownloadError:
-                    raise
-                except Exception as e:
-                    raise ValueError(f"Could not transcribe video: {e}") from None
-                finally:
-                    if audio_path and os.path.exists(audio_path):
-                        os.remove(audio_path)
-
-        else:
-            await on_step(f"Downloading {platform} audio...")
-            media_path, metadata = await download_audio(url)
-            await on_step("Transcribing...")
-            transcript = await transcribe_audio(media_path, openai_client)
-
-        if not transcript:
-            raise ValueError("No speech detected in this video.")
-
-        await on_step("Generating summary...")
-        summary = await summarize_transcript(
-            transcript, metadata, mode, openai_client,
-            frames=frames or None,
-        )
-
-        emb, files = _build_tldr_embed(
-            summary, metadata, mode, platform,
-            transcript, include_transcript, used_vision, src_label,
-        )
-        return emb, files, transcript, metadata, summary
-
-    finally:
-        if media_path and os.path.exists(media_path):
-            os.remove(media_path)
+    watched = await watch_url(url, openai_client, on_step)
+    return await _finish_tldr(watched, mode, include_transcript, openai_client, on_step)
 
 
 async def _run_tldr_attachment(
@@ -293,95 +163,20 @@ async def _run_tldr_attachment(
     openai_client: AsyncOpenAI,
     on_step,
 ) -> tuple[discord.Embed, list[discord.File], str, dict, str]:
-    """
-    TLDR pipeline for Discord-uploaded video/audio files.
-    Returns (embed, files, transcript, metadata, summary).
-    """
-    ct = (attachment.content_type or "").lower()
-    is_video = ct.startswith("video/")
-    is_audio = ct.startswith("audio/")
-    if not (is_video or is_audio):
-        raise ValueError("Attachment must be a video or audio file.")
+    """TLDR pipeline for Discord-uploaded video/audio files. Same return as _run_tldr."""
+    watched = await watch_attachment(attachment, openai_client, on_step)
+    return await _finish_tldr(watched, mode, include_transcript, openai_client, on_step)
 
-    # Video files get their audio stripped to a tiny track before Whisper, so we can
-    # accept larger uploads. Audio goes to Whisper (after optional transcode) — cap near its limit.
-    max_size = 100 * 1024 * 1024 if is_video else 25 * 1024 * 1024
-    if attachment.size > max_size:
-        raise ValueError(
-            f"File too large — max {max_size // (1024 * 1024)} MB "
-            f"(this file is {attachment.size // (1024 * 1024)} MB)."
-        )
 
-    ext = attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else ""
-
-    await on_step("Downloading attachment...")
-    path = None
-    audio_path = None
-    try:
-        path = await download_attachment(attachment.url, attachment.filename)
-        metadata: dict = {
-            "title": attachment.filename,
-            "duration": None,
-            "thumbnail": None,
-            "uploader": "",
-            "webpage_url": attachment.url,
-        }
-
-        frames: list[str] = []
-        if is_video:
-            try:
-                import cv2
-                cap = cv2.VideoCapture(path)
-                fps = cap.get(cv2.CAP_PROP_FPS) or 25
-                total = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                cap.release()
-                duration = int(total / fps) if fps else 0
-                metadata["duration"] = duration
-                if duration <= _SHORT_FORM_MAX_DURATION:
-                    frames = extract_frames(path, duration)
-            except ImportError:
-                pass
-
-        # Convert to a Whisper-supported format when needed. Video is always stripped to
-        # its audio track (handles .mov/.mkv/.avi and shrinks the upload); audio is only
-        # transcoded when its container isn't one Whisper accepts.
-        transcribe_target = path
-        if is_video or (is_audio and ext not in _WHISPER_SUPPORTED_EXTS):
-            await on_step("Extracting audio track...")
-            try:
-                audio_path = await extract_audio_track(path)
-                transcribe_target = audio_path
-            except Exception as extraction_err:
-                print(f"[tldr attachment] audio extraction failed ({extraction_err})")
-                if ext not in _WHISPER_SUPPORTED_EXTS:
-                    raise ValueError(
-                        f"Couldn't process this .{ext or 'file'} — its audio track could not be extracted."
-                    ) from None
-                transcribe_target = path  # supported container: send it as-is
-
-        await on_step("Transcribing...")
-        transcript = await transcribe_audio(transcribe_target, openai_client)
-        if not transcript:
-            raise ValueError("No speech detected in this file.")
-
-        await on_step("Generating summary...")
-        summary = await summarize_transcript(
-            transcript, metadata, mode, openai_client,
-            frames=frames or None,
-        )
-
-        platform = "Video" if is_video else "Audio"
-        emb, files = _build_tldr_embed(
-            summary, metadata, mode, platform,
-            transcript, include_transcript, bool(frames),
-        )
-        return emb, files, transcript, metadata, summary
-
-    finally:
-        if path and os.path.exists(path):
-            os.remove(path)
-        if audio_path and os.path.exists(audio_path):
-            os.remove(audio_path)
+async def _finish_tldr(watched, mode, include_transcript, openai_client, on_step):
+    await on_step("Writing the summary...")
+    summary = await summarize_video(watched.evidence, watched.metadata, mode, openai_client)
+    emb, files = _build_tldr_embed(
+        summary, watched.metadata, mode, watched.platform,
+        watched.evidence.transcript(), include_transcript, watched.evidence.label(),
+    )
+    metadata = {**watched.metadata, "media_key": watched.key}
+    return emb, files, watched.evidence.report(), metadata, summary
 
 
 class Transcribe(commands.Cog):
@@ -390,11 +185,11 @@ class Transcribe(commands.Cog):
 
     @app_commands.command(
         name="tldr",
-        description="Transcribe and summarize a video from YouTube, TikTok, Twitter/X, Instagram, Reddit, or a file.",
+        description="Watch and summarize a video from YouTube, TikTok, Twitter/X, Instagram, Reddit, or a file.",
     )
     @app_commands.describe(
         url="Link to the video — leave blank to use the most recent video link in this channel",
-        attachment="Upload a video or audio file directly to transcribe",
+        attachment="Upload a video or audio file directly to summarize",
         mode="Summary length — brief bullet points (default) or detailed paragraphs",
         include_transcript="Also attach the full raw transcript alongside the summary",
     )
@@ -410,13 +205,13 @@ class Transcribe(commands.Cog):
         progress = await interaction.followup.send("Working...", wait=True)
 
         try:
-            openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=120.0)
+            openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=300.0)
 
             async def update(text: str):
                 await progress.edit(content=text)
 
             if attachment is not None:
-                emb, files, transcript, metadata, summary = await _run_tldr_attachment(
+                emb, files, evidence, metadata, summary = await _run_tldr_attachment(
                     attachment, mode, include_transcript, openai_client, on_step=update
                 )
             else:
@@ -427,7 +222,7 @@ class Transcribe(commands.Cog):
                         await progress.edit(content="No recent video link found. Provide a URL or upload a file.")
                         return
                 url = normalize_url(url)
-                emb, files, transcript, metadata, summary = await _run_tldr(
+                emb, files, evidence, metadata, summary = await _run_tldr(
                     url, mode, include_transcript, openai_client, on_step=update
                 )
 
@@ -436,7 +231,7 @@ class Transcribe(commands.Cog):
                 await progress.edit(content=None, embed=emb, attachments=files)
             else:
                 await progress.edit(content=None, embed=emb)
-            _store_tldr_result(progress.id, transcript, metadata, summary)
+            _store_tldr_result(progress.id, evidence, metadata, summary)
 
         except ValueError as e:
             await progress.edit(content=f"Error: {e}")
@@ -466,20 +261,20 @@ async def handle_tldr_mention(message: discord.Message) -> None:
     content_lower      = (message.content or "").lower()
     mode               = "detailed" if "-detailed" in content_lower else "brief"
     include_transcript = "-transcript" in content_lower
-    openai_client      = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=120.0)
+    openai_client      = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=300.0)
 
     async def _send_url(url: str) -> None:
         url = normalize_url(url)
-        progress = await message.channel.send(f"Downloading {_detect_platform(url)} video...")
+        progress = await message.channel.send(f"Downloading {detect_platform(url)} video...")
         try:
             async def update(text: str):
                 await progress.edit(content=text)
-            emb, files, transcript, metadata, summary = await _run_tldr(
+            emb, files, evidence, metadata, summary = await _run_tldr(
                 url, mode, include_transcript, openai_client, on_step=update
             )
             await progress.delete()
             sent = await message.channel.send(embed=emb, files=files)
-            _store_tldr_result(sent.id, transcript, metadata, summary)
+            _store_tldr_result(sent.id, evidence, metadata, summary)
         except ValueError as e:
             await progress.edit(content=f"Error: {e}")
         except Exception as e:
@@ -491,12 +286,12 @@ async def handle_tldr_mention(message: discord.Message) -> None:
         try:
             async def update(text: str):
                 await progress.edit(content=text)
-            emb, files, transcript, metadata, summary = await _run_tldr_attachment(
+            emb, files, evidence, metadata, summary = await _run_tldr_attachment(
                 att, mode, include_transcript, openai_client, on_step=update
             )
             await progress.delete()
             sent = await message.channel.send(embed=emb, files=files)
-            _store_tldr_result(sent.id, transcript, metadata, summary)
+            _store_tldr_result(sent.id, evidence, metadata, summary)
         except ValueError as e:
             await progress.edit(content=f"Error: {e}")
         except Exception as e:

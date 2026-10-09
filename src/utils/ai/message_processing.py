@@ -54,6 +54,32 @@ def build_user_message_content(message, content):
     return api_message_content, display_name, username, user_id
 
 
+class ProgressNote:
+    # Shows slow steps (watching a video) as a small "-# ..." line under the typing
+    # indicator, and removes it once the reply is out. Nothing is posted for fast steps
+    # like cache hits. The channel buffer drops "-#" lines from history anyway.
+    def __init__(self, channel):
+        self.channel, self.message = channel, None
+
+    async def update(self, text):
+        if text.startswith("Already watched"):
+            return
+        try:
+            if self.message is None:
+                self.message = await self.channel.send(f"-# {text}")
+            else:
+                await self.message.edit(content=f"-# {text}")
+        except discord.HTTPException:
+            pass
+
+    async def done(self):
+        if self.message is not None:
+            try:
+                await self.message.delete()
+            except discord.HTTPException:
+                pass
+
+
 async def send_response(message, answer, suppress_mentions=False):
     # Send a response to Discord. Returns the primary sent message so callers can
     # act on it (e.g. attach a confirmation reaction for interactive actions).
