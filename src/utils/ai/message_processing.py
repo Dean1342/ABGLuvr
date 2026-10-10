@@ -16,6 +16,10 @@ def resolve_discord_user_id(user_str, guild):
         return int(match.group(1))
     if guild is None:
         return None
+    if user_str.strip().isdigit():
+        # A bare user id (the model sometimes passes one); only if it's a member here.
+        member = guild.get_member(int(user_str.strip()))
+        return member.id if member else None
 
     needle = user_str.strip().lstrip('@').lower()
     if not needle:
@@ -44,7 +48,7 @@ def build_user_message_content(message, content):
     user_id = message.author.id
 
     # Speaker label, same format as the channel history (see agent.author_tag)
-    author_info = author_tag(display_name)
+    author_info = author_tag(display_name, username)
 
     if isinstance(content, list):
         api_message_content = [{"type": "text", "text": author_info}] + content
@@ -80,21 +84,47 @@ class ProgressNote:
                 pass
 
 
+MAX_MESSAGE_LEN = 2000
+# Markdown links ("[[1]](<url>)", "[title](<url>)"): a split inside one breaks it.
+_LINK_RE = re.compile(r"\[(?:\[[^\]\n]*\]|[^\[\]\n])*\]\(<?[^)\s]*>?\)")
+
+
+def split_message(text, limit=MAX_MESSAGE_LEN):
+    # Chunks of at most `limit` chars, split at a paragraph, line or word break that
+    # isn't inside a link; a hard cut only when a single word is longer than the limit.
+    chunks = []
+    while len(text) > limit:
+        links = [m.span() for m in _LINK_RE.finditer(text, 0, limit + 200)]
+        cut = None
+        for sep in ("\n\n", "\n", " "):
+            pos = text.rfind(sep, 0, limit)
+            while pos > 0 and any(start < pos < end for start, end in links):
+                pos = text.rfind(sep, 0, pos)
+            if pos > 0:
+                cut = pos
+                break
+        cut = cut or limit
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+
 async def send_response(message, answer, suppress_mentions=False):
     # Send a response to Discord. Returns the primary sent message so callers can
     # act on it (e.g. attach a confirmation reaction for interactive actions).
     # suppress_mentions=True stops the reply from pinging anyone — used for the ack of
     # a ping/schedule action so the target isn't notified (spoiled) before it fires.
     answer = format_discord_links(answer)
-    max_len = 2000
     kwargs = {"allowed_mentions": discord.AllowedMentions.none()} if suppress_mentions else {}
 
-    if len(answer) <= max_len:
+    if len(answer) <= MAX_MESSAGE_LEN:
         return await message.reply(answer, **kwargs)
     else:
         first = None
-        for i in range(0, len(answer), max_len):
-            sent = await message.channel.send(answer[i:i+max_len], **kwargs)
+        for chunk in split_message(answer):
+            sent = await message.channel.send(chunk, **kwargs)
             if first is None:
                 first = sent
         return first

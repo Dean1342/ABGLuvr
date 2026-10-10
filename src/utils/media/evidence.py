@@ -89,6 +89,9 @@ Besides the report, fill focus_notes with everything in the footage that bears o
 _CLOSER_LOOK_PROMPT = """Someone asked about this video: "{question}"
 Watch it closely with that question in mind and report everything in the footage that bears on it: visible clues (software, tools, UI, edits, settings, credits, handles, links), what's said, and the moments that matter, with timestamps (MM:SS). Say which parts you saw or heard and which you're inferring, and say so plainly if the footage doesn't show the answer. """ + _UNTRUSTED
 
+_SEGMENT_PROMPT = """
+You're shown only the part of the video from {start} to {end}, the stretch they're asking about. Give every timestamp as a position in the full video (so between {start} and {end}), and describe what's said and shown in order. Don't guess about the rest of the video."""
+
 
 def mmss(seconds) -> str:
     seconds = float(seconds or 0)
@@ -262,7 +265,9 @@ async def _gemini_video(path, youtube_id, settings, prompt, schema=None):
         else:
             uploaded = await gemini.upload(path)
             source = {"file_data": types.FileData(file_uri=uploaded.uri, mime_type=uploaded.mime_type)}
-        part = types.Part(**source, video_metadata=types.VideoMetadata(fps=settings["fps"]))
+        segment = settings.get("segment")  # (start, end) seconds: Gemini only sees that stretch
+        offsets = {"start_offset": f"{segment[0]}s", "end_offset": f"{segment[1]}s"} if segment else {}
+        part = types.Part(**source, video_metadata=types.VideoMetadata(fps=settings["fps"], **offsets))
         config = types.GenerateContentConfig(
             # Request-level: the per-Part setting didn't change video tokens in testing.
             media_resolution=getattr(types.MediaResolution, f"MEDIA_RESOLUTION_{settings['resolution']}"),
@@ -304,13 +309,19 @@ async def _hedged(call, hedge_after):
     raise error
 
 
-async def closer_look(*, path=None, youtube_id=None, duration=None, has_audio=None, question: str) -> str:
-    # A second, question-driven pass over a video that was already watched, for details the
-    # general report didn't cover ("how did they do it", "what happens at 0:22").
+async def closer_look(*, path=None, youtube_id=None, duration=None, has_audio=None, question: str,
+                      segment=None) -> str:
+    # A question-driven pass over a video, for details a general report doesn't cover ("how
+    # did they do it"). segment=(start, end) seconds watches only that stretch, at short-clip
+    # settings: "what happens at 2:00" in a 22-min video took 132s as a whole-video watch.
     started = time.monotonic()
-    settings = _gemini_settings(duration)
+    span = (segment[1] - segment[0]) if segment else duration
+    settings = _gemini_settings(span)
     prompt = _CLOSER_LOOK_PROMPT.format(question=question) + _measured(duration, has_audio)
-    response, model = await _gemini_video(path, youtube_id, {**settings, "hedge_after": _hedge_after(duration)}, prompt)
+    if segment:
+        prompt += _SEGMENT_PROMPT.format(start=mmss(segment[0]), end=mmss(segment[1]))
+        settings["segment"] = segment
+    response, model = await _gemini_video(path, youtube_id, {**settings, "hedge_after": _hedge_after(span)}, prompt)
     usage = response.usage_metadata
     out_tokens = (usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0)
     cost = ((usage.prompt_token_count or 0) * _GEMINI_RATES[0] + out_tokens * _GEMINI_RATES[1]) / 1e6

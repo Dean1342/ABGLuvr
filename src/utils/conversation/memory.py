@@ -1,13 +1,13 @@
 # Long-term memory beyond the recent channel window.
 #
-# Two layers, injected together as one developer note placed before the window:
+# Two layers, injected together as one note (user-role, marked as the bot's) placed before the window:
 #   1. Remembered facts: things someone explicitly asked the bot to remember, scoped to
 #      a user, a channel, or the whole server. Only the remember_fact / forget_fact
 #      tools and /memory write them; nothing is saved automatically.
 #   2. Rolling channel summary: once enough messages have slid out of the window, they
 #      are fetched from Discord and folded into a per-channel summary by the default
 #      model. Normally that runs in the background after a reply. When the window is
-#      nearly empty (the channel went quiet for hours) it runs before replying instead,
+#      nearly empty or the channel went quiet for hours, it runs before replying instead,
 #      so "what were we talking about yesterday" still works.
 #
 # Both are stored in Supabase and cached here. A missing table or DB error is logged
@@ -20,7 +20,7 @@ import discord
 
 from utils.conversation.context import DEFAULT_MODEL_ID
 from utils.conversation.channel_context import (
-    _render, _snapshot, buffered_between, reset_cutoff, window_floor,
+    BOT_NOTE, _render, _snapshot, buffered_between, last_message_at, person_label, reset_cutoff, snap_label, window_floor,
 )
 from utils.integrations import supabase_client as db
 
@@ -30,6 +30,7 @@ SUMMARY_FIRST_LOOKBACK = datetime.timedelta(days=7)  # how far back a first summ
 SUMMARY_CHUNK_CHARS = 200_000    # transcript folded in per model call (~50k tokens; one call in practice)
 SUMMARY_MAX_WORDS = 600
 SUMMARY_INLINE_BELOW = 5         # window smaller than this -> refresh before replying
+SUMMARY_INLINE_AFTER_QUIET = datetime.timedelta(hours=6)  # ...or the channel was quiet this long
 SUMMARY_INLINE_TIMEOUT = 25      # seconds; the refresh keeps going in the background after
 MAX_FACT_CHARS = 300
 MAX_FACTS_PER_GUILD = 300
@@ -45,6 +46,8 @@ Keep what someone might bring up again later:
 - ongoing topics and arguments, and how they ended
 - questions ABGLuvr answered and what it said (one line each)
 - running jokes and nicknames
+
+Keep who-did-what exact. "I"/"me"/"my" in a message means the person who sent that message, so when Frogs says "I got laid off" and someone else answers, it's Frogs who got laid off. People are shown as "Display (@username)"; name them that way when two share a display name. If it's unclear who something happened to, leave it out instead of guessing.
 
 Drop greetings, filler, one-off banter, and link or embed noise. Fold the new messages into the existing memory: update or remove things that changed or are clearly over, keep the rest. Put dates (like "Oct 6") on anything time-sensitive.
 
@@ -167,11 +170,9 @@ def fact_label(row, name_of):
 
 
 def member_label(member):
-    # "Display (@username)" when they differ, so the model can match either name to a
-    # [Display]-tagged speaker or to how people refer to each other.
-    if member.name.casefold() == member.display_name.casefold():
-        return member.display_name
-    return f"{member.display_name} (@{member.name})"
+    # "Display (@username)" when they differ: the same label speaker tags use, so the
+    # model can match a fact's people to who's talking or how people refer to each other.
+    return person_label(member.display_name, member.name)
 
 
 def fact_line(row, name_of):
@@ -234,12 +235,12 @@ def _start_refresh(channel, bot_user_id, floor_id, client):
 
 def _transcript(messages, bot_user_id, bot_name):
     snaps = [_snapshot(m, bot_user_id) for m in messages]
-    names = {s["id"]: (bot_name if s["is_self"] else s["author_name"]) for s in snaps}
+    names = {s["id"]: (bot_name if s["is_self"] else snap_label(s)) for s in snaps}
     lines = []
     for s in snaps:
         text = _render(s, names)
         if text:
-            who = f"{bot_name} (you)" if s["is_self"] else s["author_name"]
+            who = f"{bot_name} (you)" if s["is_self"] else snap_label(s)
             lines.append(f"[{s['created_at']:%b %d %H:%M}] {who}: {text}")
     return lines
 
@@ -341,14 +342,18 @@ def format_memory_note(facts, summary_row, name_of, requester_id):
                             _summary_section(summary_row) if summary_row else None) if s]
     if not sections:
         return None
-    return {"role": "system", "content": "# Long-term memory\n\n" + "\n\n".join(sections)}
+    # Facts and the summary are people's words (or a digest of them), so they go in as user
+    # content marked as the bot's own note, never at instruction priority.
+    return {"role": "user", "content": BOT_NOTE + "\n# Long-term memory\n\n" + "\n\n".join(sections)}
 
 
 async def build_memory_note(message, bot_user_id, requester_id, history, client):
-    # The developer note that goes in front of the channel window, or None.
+    # The note that goes in front of the channel window, or None.
     channel_id = message.channel.id
     floor_id, window_size = window_floor(message, bot_user_id)
-    if window_size < SUMMARY_INLINE_BELOW and await _needs_refresh(channel_id, floor_id):
+    last = last_message_at(channel_id, message.id)
+    quiet = last is not None and message.created_at - last >= SUMMARY_INLINE_AFTER_QUIET
+    if (window_size < SUMMARY_INLINE_BELOW or quiet) and await _needs_refresh(channel_id, floor_id):
         task = _start_refresh(message.channel, bot_user_id, floor_id, client)
         try:
             await asyncio.wait_for(asyncio.shield(task), SUMMARY_INLINE_TIMEOUT)
